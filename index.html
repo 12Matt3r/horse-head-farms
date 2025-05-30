@@ -1,0 +1,313 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Horse Head Farms Summer Camp - Lake of Whispers</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        #ui div {
+            margin-bottom: 8px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ff0000;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        #endScreen, #settings, #modelSelection {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            padding: 30px;
+            border-radius: 8px;
+            border: 2px solid #ff0000;
+            text-align: center;
+            pointer-events: all;
+        }
+
+        #settings {
+            width: 300px;
+            text-align: left;
+        }
+
+        #settings label {
+            display: block;
+            margin: 10px 0;
+            color: #fff;
+        }
+
+        #settings input, #settings select {
+            background: #333;
+            color: #fff;
+            border: 1px solid #666;
+            padding: 5px;
+        }
+
+        #modelSelection {
+            width: 600px;
+            max-width: 90vw;
+        }
+
+        #modelOptions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .model-option {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .model-option:hover {
+            border-color: #ff0000;
+            background: rgba(255, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .model-option.selected {
+            border-color: #ff0000;
+            background: rgba(255, 0, 0, 0.2);
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.5);
+        }
+
+        .model-option img {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+
+        .model-option span {
+            font-size: 0.9em;
+            color: #fff;
+        }
+
+        button {
+            background: #ff0000;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-family: inherit;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background: #aa0000;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.8);
+        }
+
+        #confirmModel {
+            margin-top: 20px;
+        }
+
+        #confirmModel:hover {
+            background: #aa0000;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.8);
+        }
+
+        #confirmModel:disabled {
+            background: #666;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        #crosshair::before,
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 255, 255, 0.8);
+        }
+
+        #crosshair::before {
+            width: 20px;
+            height: 2px;
+            top: 9px;
+            left: 0;
+        }
+
+        #crosshair::after {
+            width: 2px;
+            height: 20px;
+            top: 0;
+            left: 9px;
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #ff0000;
+            border-radius: 4px;
+            max-width: 250px;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                cursor: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="loadingScreen">
+        <div id="loadingSpinner"></div>
+        <div>Loading Horse Head Farms...</div>
+    </div>
+
+    <!-- Simplified UI -->
+    <div id="ui">
+        <div id="countdown"></div>
+        <div id="timer"></div>
+        <div id="message"></div>
+        <div id="score">Players: <span id="playerCount">0</span></div>
+        <div id="gamePhase">Lobby</div>
+        <div>Role: <span id="playerRole">Waiting...</span></div>
+    </div>
+
+    <!-- Win/Lose Screen -->
+    <div id="endScreen" class="hidden">
+        <h1 id="endTitle"></h1>
+        <button id="restartBtn">Restart</button>
+    </div>
+
+    <!-- Player Model Selection -->
+    <div id="modelSelection" class="hidden">
+        <h2>Choose Your Character</h2>
+        <div id="modelOptions">
+            <div class="model-option" data-model="default">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjNDQ0NDQ0Ii8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIj5EZWZhdWx0PC90ZXh0Pgo8L3N2Zz4K" alt="Default">
+                <span>Default</span>
+            </div>
+            <div class="model-option" data-model="pomni">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjRkY2NjAwIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Qb21uaTwvdGV4dD4KPC9zdmc+Cg==" alt="Pomni">
+                <span>Pomni</span>
+            </div>
+            <div class="model-option" data-model="model1">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMDBGRjAwIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Nb2RlbCAxPC90ZXh0Pgo8L3N2Zz4K" alt="Model 1">
+                <span>Character 1</span>
+            </div>
+            <div class="model-option" data-model="model2">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMDBGRkZGIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Nb2RlbCDCjDwvdGV4dD4KPC9zdmc+Cg==" alt="Model 2">
+                <span>Character 2</span>
+            </div>
+            <div class="model-option" data-model="model3">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjRkYwMEZGIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Nb2RlbCAzPC90ZXh0Pgo8L3N2Zz4K" alt="Model 3">
+                <span>Character 3</span>
+            </div>
+            <div class="model-option" data-model="model4">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjRkZGRjAwIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iIzAwMDAwMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Nb2RlbCA0PC90ZXh0Pgo8L3N2Zz4K" alt="Model 4">
+                <span>Character 4</span>
+            </div>
+            <div class="model-option" data-model="model5">
+                <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjRkYwMDAwIi8+Cjx0ZXh0IHg9IjMyIiB5PSIzNiIgZmlsbD0iI0ZGRkZGRiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEwIj5Nb2RlbCA1PC90ZXh0Pgo8L3N2Zz4K" alt="Model 5">
+                <span>Character 5</span>
+            </div>
+        </div>
+        <button id="confirmModel">Confirm Selection</button>
+    </div>
+
+    <!-- Settings Panel -->
+    <div id="settings" class="hidden">
+        <h2>Settings</h2>
+        <label><input type="checkbox" id="toggleFog" checked> Fog Effects</label>
+        <label>Audio Volume: <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.5"></label>
+        <label>Graphics Quality: 
+            <select id="gfxQuality">
+                <option value="high">High</option>
+                <option value="medium" selected>Medium</option>
+                <option value="low">Low</option>
+            </select>
+        </label>
+        <button id="closeSettings">Close</button>
+    </div>
+
+    <div id="crosshair" class="hidden"></div>
+
+    <div id="instructions" class="hidden">
+        <h4 style="color: #ff0000; margin-bottom: 10px;">Controls:</h4>
+        <p>WASD - Move</p>
+        <p>Mouse - Look Around</p>
+        <p>Left Click - Lay Down</p>
+        <p>Right Click - Climb</p>
+        <p>F - Crouch</p>
+        <p>E - Interact</p>
+    </div>
+
+    <!-- Menu overlay for initial game join -->
+    <div id="menu">
+        <h1>HORSE HEAD FARMS</h1>
+        <h2>Summer Camp - Lake of Whispers</h2>
+        <p style="margin-bottom: 20px; color: #ccc;">A multiplayer horror hide & seek experience</p>
+        <button id="selectModelBtn">Select Character</button>
+        <button id="joinGameBtn">Join Game</button>
+        <button id="settingsBtn">Settings</button>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+            "three/examples/jsm/": "https://unpkg.com/three@0.158.0/examples/jsm/",
+            "nipplejs": "https://cdn.jsdelivr.net/npm/nipplejs@0.10.1/dist/nipplejs.esm.js"
+        }
+    }
+    </script>
+
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
