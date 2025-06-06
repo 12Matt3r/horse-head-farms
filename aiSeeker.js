@@ -1,10 +1,12 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es'; // Import CANNON
 
 export class AISeeker {
-    constructor(scene, environment, audioManager) {
+    constructor(scene, environment, audioManager, world) { // Add world
         this.scene = scene;
         this.environment = environment;
-        this.audioManager = audioManager; // Store AudioManager instance
+        this.audioManager = audioManager;
+        this.world = world; // Store world instance
         
         this.position = new THREE.Vector3(0, 2, 0);
         this.rotation = 0;
@@ -23,8 +25,8 @@ export class AISeeker {
         this.viewAngle = Math.PI / 3; // 60 degrees
         this.hearingDistance = 8;
         
-        this.raycaster = new THREE.Raycaster();
-        this.obstacles = [];
+        // this.raycaster = new THREE.Raycaster(); // Will use CANNON.World for raycasting
+        this.obstacles = []; // May become obsolete or store non-physical obstacles
         
         // AI decision making
         this.lastDecisionTime = 0;
@@ -273,12 +275,27 @@ export class AISeeker {
             
             if (angle > this.viewAngle / 2) continue;
             
-            // Check line of sight
-            this.raycaster.set(this.position, direction);
-            const intersections = this.raycaster.intersectObjects(this.obstacles);
+            // Check line of sight using Cannon.js raycast
+            const rayFrom = new CANNON.Vec3(this.position.x, this.position.y, this.position.z);
+            // Assuming player.position is a THREE.Vector3, needs conversion if player object also uses Cannon body.
+            // For now, assume player.position is the target point.
+            const playerPosition = player.getPosition ? player.getPosition() : player.position; // Adapt if player has getPosition() for its body
+            const rayTo = new CANNON.Vec3(playerPosition.x, playerPosition.y, playerPosition.z);
             
-            if (intersections.length === 0 || intersections[0].distance > distance) {
-                visible.push(player);
+            const result = new CANNON.RaycastResult();
+            const raycastOptions = {
+                // collisionFilterGroup: undefined, // Define if AI is in a specific group
+                // collisionFilterMask: undefined,  // Define to collide with env + player groups
+                skipBackfaces: true
+            };
+            this.world.raycastClosest(rayFrom, rayTo, raycastOptions, result);
+
+            // If ray hits something, check if it's closer than the player
+            // A more robust check would be to see if result.body is the player's physics body.
+            if (result.hasHit && result.distance < distance - 0.1) { // -0.1 to avoid self-intersection issues if ray starts inside player
+                // Occluded by an environment object
+            } else {
+                visible.push(player); // No hit, or hit is beyond/at the player
             }
         }
         
@@ -406,61 +423,59 @@ export class AISeeker {
     }
     
     moveTowards(direction, speed, deltaTime) {
-        const baseMoveDirection = direction.clone(); // Original desired direction
+        const baseMoveDirection = direction.clone();
         let chosenDirection = baseMoveDirection.clone();
-        let bestDistance = 0; // Store the distance of the chosen clear path
-        let directPathClear = false;
+        let bestDistance = -1;
+        let currentSpeed = speed;
 
-        const feelerAngles = [-Math.PI / 6, 0, Math.PI / 6]; // -30, 0, +30 degrees
-        const feelerDistanceThreshold = 2.5; // How far the feelers check
-        let currentSpeed = speed; // Use a modifiable speed
+        const feelerAngles = [-Math.PI / 6, 0, Math.PI / 6];
+        const feelerLength = 3.0;
+        const feelerDistanceThreshold = 2.5;
+        let foundClearPath = false;
 
-        // Check direct path first (center feeler)
-        this.raycaster.set(this.position, baseMoveDirection);
-        let intersections = this.raycaster.intersectObjects(this.obstacles, false); // Non-recursive for performance
+        // AI's "eye" or raycast origin height - adjust if AI has a different pivot/height
+        const aiRaycastY = this.position.y + 1.0;
+        const rayFrom = new CANNON.Vec3(this.position.x, aiRaycastY, this.position.z);
 
-        if (intersections.length === 0 || intersections[0].distance > feelerDistanceThreshold) {
-            directPathClear = true;
-            bestDistance = intersections.length > 0 ? intersections[0].distance : Infinity;
-            chosenDirection = baseMoveDirection;
-        }
+        for (const angle of feelerAngles) {
+            const feelerDirTHREE = baseMoveDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+            const feelerDirCANNON = new CANNON.Vec3(feelerDirTHREE.x, 0, feelerDirTHREE.z).normalize(); // Ensure Y is 0 for horizontal feeler, then normalize
 
-        if (!directPathClear) {
-            let foundClearPath = false;
-            // Initialize bestDistance to a very small number if direct path is blocked
-            bestDistance = -1;
+            const rayTo = new CANNON.Vec3(
+                rayFrom.x + feelerDirCANNON.x * feelerLength,
+                aiRaycastY, // Keep feeler ray horizontal for obstacle avoidance
+                rayFrom.z + feelerDirCANNON.z * feelerLength
+            );
 
-            for (let i = 0; i < feelerAngles.length; i++) {
-                const angle = feelerAngles[i];
-                // Skip direct path (angle === 0) if it was already checked and found blocked.
-                // Or rather, ensure we always consider it but update chosenDirection only if it's better.
-                const currentFeelerDirection = baseMoveDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
-                this.raycaster.set(this.position, currentFeelerDirection);
-                intersections = this.raycaster.intersectObjects(this.obstacles, false);
+            const result = new CANNON.RaycastResult();
+            const raycastOptions = {
+                skipBackfaces: true,
+                // collisionFilterGroup: AI_GROUP, // Example
+                // collisionFilterMask: ENVIRONMENT_GROUP // Example
+            };
+            this.world.raycastClosest(rayFrom, rayTo, raycastOptions, result);
 
-                const distance = intersections.length > 0 ? intersections[0].distance : Infinity;
+            const distance = result.hasHit ? result.distance : Infinity;
 
-                if (distance > bestDistance) { // If this path is better (clearer or less blocked)
-                    bestDistance = distance;
-                    chosenDirection = currentFeelerDirection;
-                    if (distance > feelerDistanceThreshold) {
-                        foundClearPath = true; // Mark if we found a path considered "clear enough"
-                    }
-                }
-            }
-
-            // If no path is "clear enough" (above threshold), we've chosen the least blocked one.
-            // Now, adjust speed based on how blocked the chosen path is.
-            if (!foundClearPath) {
-                if (bestDistance < 1.0) { // If the best it can do is still very close to an obstacle
-                    currentSpeed *= 0.2; // Drastically reduce speed
-                } else if (bestDistance < feelerDistanceThreshold) { // If path is somewhat blocked but not critically
-                    currentSpeed *= 0.5; // Reduce speed moderately
+            if (distance > bestDistance) {
+                bestDistance = distance;
+                chosenDirection.copy(feelerDirTHREE);
+                if (distance > feelerDistanceThreshold) {
+                    foundClearPath = true;
                 }
             }
         }
 
-        // Update velocity based on the chosenDirection and potentially modified speed
+        if (!foundClearPath) {
+            if (bestDistance < 1.0) {
+                currentSpeed *= 0.2;
+                // If completely blocked, consider turning more sharply or a different strategy
+                // For now, just slowing down and using the "least blocked" path.
+            } else if (bestDistance < feelerDistanceThreshold) {
+                currentSpeed *= 0.5;
+            }
+        }
+
         this.velocity.x = chosenDirection.x * currentSpeed;
         this.velocity.z = chosenDirection.z * currentSpeed;
         
@@ -548,7 +563,11 @@ export class AISeeker {
     }
     
     setObstacles(obstacles) {
-        this.obstacles = obstacles;
+        // This method is now largely obsolete for physical obstacles, as the AI uses world raycasting.
+        // It could be repurposed for non-physical navigation hints if needed in the future.
+        // For now, ensure 'this.obstacles' is not used by raycasting logic.
+        this.obstacles = []; // Clear it to be safe, or remove its usage entirely.
+        console.log("AISeeker.setObstacles called - physical obstacles are now detected via world raycasting.");
     }
     
     setPosition(position) {

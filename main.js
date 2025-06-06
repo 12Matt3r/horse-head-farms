@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import { Player } from './player.js';
 import { AISeeker } from './aiSeeker.js';
 import { Environment } from './environment.js';
@@ -17,6 +18,7 @@ class HorseHeadFarms {
         this.audioManager = null; // Added AudioManager instance
         this.room = null;
         this.controls = null;
+        this.world = null; // Cannon.js world
         // this.masterVolume = 1; // masterVolume is now handled by AudioManager
         this.selectedModel = 'default';
         this.playerModels = new Map();
@@ -42,20 +44,23 @@ class HorseHeadFarms {
             this.setupScene();
             this.setupRenderer();
             this.setupCamera();
+            this.setupPhysics(); // Initialize Cannon.js world
             
             // Initialize WebSim room
             this.room = new WebsimSocket();
             await this.room.initialize();
             
             // Create game components
-            this.environment = new Environment(this.scene);
-            // Pass audioManager to Player and AISeeker
-            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager);
-            this.aiSeeker = new AISeeker(this.scene, this.environment, this.audioManager);
+            // Pass the cannon world to environment and player
+            this.environment = new Environment(this.scene, this.world);
+            // Pass audioManager and world to Player and AISeeker
+            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager, this.world);
+            this.aiSeeker = new AISeeker(this.scene, this.environment, this.audioManager, this.world); // Assuming AISeeker might also need the world
             this.gameManager = new GameManager(this.room, this.player, this.aiSeeker, this.environment);
             
             // Setup component interactions
-            this.player.setCollisionObjects(this.environment.getCollisionObjects());
+            // Collision objects are now managed by cannon-es world.
+            // this.player.setCollisionObjects(this.environment.getCollisionObjects());
             this.player.setHideSpots(this.environment.getHidingSpots());
             this.aiSeeker.setObstacles(this.environment.getCollisionObjects());
             
@@ -103,6 +108,53 @@ class HorseHeadFarms {
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
+    }
+
+    setupPhysics() {
+        this.world = new CANNON.World();
+        this.world.gravity.set(0, -9.82 * 2.5, 0); // Adjusted gravity
+        this.world.broadphase = new CANNON.SAPBroadphase(this.world);
+        // this.world.solver.iterations = 10;
+
+        // Materials (referenced by name, actual instances created in Player and Environment)
+        const playerMaterial = new CANNON.Material("playerMaterial");
+        const environmentMaterial = new CANNON.Material("environmentMaterial"); // Used by Environment.js
+        const groundMaterial = new CANNON.Material("groundMaterial"); // For the main.js ground plane
+
+        // Main ground plane (flat, fallback)
+        const mainGroundBody = new CANNON.Body({
+            mass: 0,
+            material: groundMaterial, // Specific material for this plane
+            shape: new CANNON.Plane(),
+        });
+        mainGroundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        mainGroundBody.position.set(0, -0.1, 0); // Slightly below environment heightfield to avoid Z-fighting if both are at y=0
+        this.world.addBody(mainGroundBody);
+
+        // Contact material for Player interactions with Environment objects (including Heightfield terrain)
+        const playerEnvContactMaterial = new CANNON.ContactMaterial(
+            playerMaterial,
+            environmentMaterial,
+            {
+                friction: 0.2,    // Lower friction for smoother movement against complex env colliders
+                restitution: 0.05 // Very low bounce
+            }
+        );
+        this.world.addContactMaterial(playerEnvContactMaterial);
+
+        // Contact material for Player interactions with the main.js flat ground plane
+        const playerGroundContactMaterial = new CANNON.ContactMaterial(
+            playerMaterial,
+            groundMaterial,
+            {
+                friction: 0.3,    // Standard friction for the basic ground
+                restitution: 0.1  // Low bounce
+            }
+        );
+        this.world.addContactMaterial(playerGroundContactMaterial);
+
+        // The old defaultMaterial and its contact material are no longer primary for player.
+        // If any other objects were to use "defaultMaterial", their interactions would need defining.
     }
     
     setupCamera() {
@@ -695,6 +747,11 @@ class HorseHeadFarms {
             const deltaTime = Math.min(this.clock.getDelta(), 0.1); // Cap delta time
             const currentTime = this.clock.getElapsedTime();
             
+            // Step the physics world
+            if (this.world) {
+                this.world.step(1 / 60, deltaTime, 3); // Fixed timestep, delta, max subSteps
+            }
+
             // Update performance stats
             this.updatePerformanceStats();
             
@@ -770,8 +827,14 @@ window.addEventListener('load', () => {
 // The AudioManager's constructor now handles the initial user interaction
 // to create/resume the AudioContext.
 // We might still want a general resume on visibility change or other interactions if needed.
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && this.audioManager) {
-        this.audioManager.resumeContext();
+document.addEventListener('visibilitychange', function() { // Use function to avoid 'this' issues if HorseHeadFarms instance is not accessible
+    const gameInstance = window.horseHeadFarmsInstance; // Assuming game instance is globally accessible
+    if (gameInstance && document.visibilityState === 'visible' && gameInstance.audioManager) {
+        gameInstance.audioManager.resumeContext();
     }
+});
+
+// Make instance globally accessible if needed for event handlers like visibilitychange
+window.addEventListener('load', () => {
+    window.horseHeadFarmsInstance = new HorseHeadFarms();
 });
