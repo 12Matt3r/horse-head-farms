@@ -3,6 +3,7 @@ import { Player } from './player.js';
 import { AISeeker } from './aiSeeker.js';
 import { Environment } from './environment.js';
 import { GameManager } from './gameManager.js';
+import { AudioManager } from './audioManager.js';
 
 class HorseHeadFarms {
     constructor() {
@@ -13,9 +14,10 @@ class HorseHeadFarms {
         this.aiSeeker = null;
         this.environment = null;
         this.gameManager = null;
+        this.audioManager = null; // Added AudioManager instance
         this.room = null;
         this.controls = null;
-        this.masterVolume = 1;
+        // this.masterVolume = 1; // masterVolume is now handled by AudioManager
         this.selectedModel = 'default';
         this.playerModels = new Map();
         
@@ -35,6 +37,8 @@ class HorseHeadFarms {
     
     async init() {
         try {
+            this.audioManager = new AudioManager(); // Instantiate AudioManager
+
             this.setupScene();
             this.setupRenderer();
             this.setupCamera();
@@ -45,8 +49,9 @@ class HorseHeadFarms {
             
             // Create game components
             this.environment = new Environment(this.scene);
-            this.player = new Player(this.scene, this.camera, this.renderer, this.room);
-            this.aiSeeker = new AISeeker(this.scene, this.environment);
+            // Pass audioManager to Player and AISeeker
+            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager);
+            this.aiSeeker = new AISeeker(this.scene, this.environment, this.audioManager);
             this.gameManager = new GameManager(this.room, this.player, this.aiSeeker, this.environment);
             
             // Setup component interactions
@@ -163,9 +168,9 @@ class HorseHeadFarms {
         
         if (volumeSlider) {
             volumeSlider.addEventListener('input', (e) => {
-                if (window.audioContext && window.audioContext.destination) {
-                    // Adjust master volume if possible
-                    this.masterVolume = parseFloat(e.target.value);
+                // Use AudioManager to set master volume
+                if (this.audioManager) {
+                    this.audioManager.setMasterVolume(parseFloat(e.target.value));
                 }
             });
         }
@@ -559,67 +564,59 @@ class HorseHeadFarms {
         animate();
     }
     
-    playScreamSound(position) {
-        if (!window.audioContext) return;
-        
-        // Generate scream sound
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 1.5, audioContext.sampleRate);
+    async playScreamSound(position) {
+        if (!this.audioManager || !this.audioManager.getAudioContext()) return;
+
+        // Create a simple scream buffer
+        const audioContext = this.audioManager.getAudioContext();
+        const duration = 1.5;
+        const sampleRate = audioContext.sampleRate;
+        const buffer = audioContext.createBuffer(1, sampleRate * duration, sampleRate);
         const data = buffer.getChannelData(0);
-        
+
         for (let i = 0; i < buffer.length; i++) {
-            const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 800 + Math.sin(t * 100) * 50) * Math.exp(-t * 2) * 0.5;
+            const t = i / sampleRate;
+            // A more piercing scream effect
+            data[i] = Math.sin(t * 1000 + Math.sin(t * 150 + Math.sin(t * 50) * 20) * 80) * Math.exp(-t * 3) * 0.7;
         }
         
-        const source = audioContext.createBufferSource();
-        const gainNode = audioContext.createGain();
-        
-        source.buffer = buffer;
-        
-        // 3D positioning
+        let soundVolume = 0.5;
         if (position && this.player) {
             const distance = this.player.getPosition().distanceTo(
                 new THREE.Vector3(position.x, position.y, position.z)
             );
-            gainNode.gain.value = Math.max(0, 1 - distance / 20);
-        } else {
-            gainNode.gain.value = 0.5;
+            soundVolume = Math.max(0, 1 - distance / 25); // Falloff distance
         }
-        
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        source.start();
+
+        this.audioManager.playSound(buffer, { volume: soundVolume });
     }
-    
-    playFootstepSound(position, volume = 0.1) {
-        if (!window.audioContext || !position || !this.player) return;
-        
+
+    async playFootstepSound(position, volume = 0.2) {
+        if (!this.audioManager || !this.audioManager.getAudioContext() || !position || !this.player) return;
+
         const distance = this.player.getPosition().distanceTo(
             new THREE.Vector3(position.x, position.y, position.z)
         );
-        
-        if (distance > 15) return; // Too far to hear
-        
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.2, audioContext.sampleRate);
+
+        if (distance > 20) return; // Too far to hear
+
+        const audioContext = this.audioManager.getAudioContext();
+        const duration = 0.25;
+        const sampleRate = audioContext.sampleRate;
+        const buffer = audioContext.createBuffer(1, sampleRate * duration, sampleRate);
         const data = buffer.getChannelData(0);
-        
+
+        // Softer, more distinct footstep
         for (let i = 0; i < buffer.length; i++) {
-            data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (buffer.length * 0.1));
+            const t = i / sampleRate;
+            data[i] = (Math.random() * 0.5 - 0.25) * Math.exp(-t * 20); // Quieter and shorter
         }
         
-        const source = audioContext.createBufferSource();
-        const gainNode = audioContext.createGain();
-        
-        source.buffer = buffer;
-        gainNode.gain.value = volume * Math.max(0, 1 - distance / 15);
-        
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        source.start();
+        const soundVolume = volume * Math.max(0, 1 - distance / 20);
+
+        this.audioManager.playSound(buffer, { volume: soundVolume });
     }
-    
+
     showErrorMessage(message) {
         const notification = document.getElementById('gameNotification');
         if (notification) {
@@ -770,13 +767,11 @@ window.addEventListener('load', () => {
     new HorseHeadFarms();
 });
 
-// Handle audio context on user interaction
-document.addEventListener('click', () => {
-    if (!window.audioContext) {
-        window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+// The AudioManager's constructor now handles the initial user interaction
+// to create/resume the AudioContext.
+// We might still want a general resume on visibility change or other interactions if needed.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && this.audioManager) {
+        this.audioManager.resumeContext();
     }
-    
-    if (window.audioContext.state === 'suspended') {
-        window.audioContext.resume();
-    }
-}, { once: true });
+});

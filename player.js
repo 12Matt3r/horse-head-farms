@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 
 export class Player {
-    constructor(scene, camera, renderer, room) {
+    constructor(scene, camera, renderer, room, audioManager) {
         this.scene = scene;
         this.camera = camera;
         this.renderer = renderer;
         this.room = room;
+        this.audioManager = audioManager; // Store AudioManager instance
         
         this.position = new THREE.Vector3(0, 2, 0);
         this.velocity = new THREE.Vector3();
@@ -34,6 +35,10 @@ export class Player {
         this.raycaster = new THREE.Raycaster();
         this.groundCheckRay = new THREE.Raycaster();
         this.isGrounded = false;
+        // Player's visual representation is a capsule (body height ~1.5, radius 0.3).
+        // this.position is intended to be at the base/center of the player for collision purposes.
+        this.playerCollisionRadius = 0.5; // Effective radius for object collision.
+        this.playerHeight = 1.8; // Approximate logical height, visual could be different.
         
         // Camera controls
         this.mouseSensitivity = 0.002;
@@ -42,8 +47,11 @@ export class Player {
         this.yawObject.add(this.pitchObject);
         this.pitchObject.add(camera);
         
-        // Sound effects
-        this.setupAudio();
+        // Sound effects - will be loaded using AudioManager
+        this.footstepBuffer = null;
+        this.jumpBuffer = null;
+        this.landBuffer = null;
+        this.loadSounds(); // Method to load sounds
         
         // Create visual representation
         this.createVisual();
@@ -53,6 +61,18 @@ export class Player {
     }
     
     createVisual() {
+        // Player's visual representation is a capsule (body visual radius 0.3, cylinder height 1.5).
+        // this.position is the logical reference point for the player, often the center of the base of the collision shape.
+        // The visual mesh components are positioned relative to this.position.
+        // For example, if this.position is at the player's feet:
+        // - The capsule body's center would be at y = capsule_radius + cylinder_half_height.
+        // - The head would be on top of that.
+        // Current visual setup: body.position.y = 0.75 and head.position.y = 1.6.
+        // This implies this.position is NOT at the absolute feet of the player model if the model total height is around 1.8-2.0.
+        // It's closer to the center of the capsule's cylindrical part.
+        // This detail is important for how checkGrounded's raycast (from this.position) relates to the visual model.
+        // For this review, we'll assume this.playerCollisionRadius and the ground check logic correctly use this.position
+        // as the reference, and visual offsets are for visual purposes only.
         const group = new THREE.Group();
         
         // Player body
@@ -113,103 +133,72 @@ export class Player {
             }
         });
     }
-    
-    setupAudio() {
-        if (!window.audioContext) {
-            window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    async loadSounds() {
+        if (!this.audioManager) return;
+        // Paths to actual sound files would be better, but generating for now
+        // For footstep, jump, land sounds, it's often better to have short audio files.
+        // Here, we'll keep generating them for simplicity in this step,
+        // but ideally, these would be loaded via this.audioManager.loadSound('path/to/sound.wav')
+
+        const audioContext = this.audioManager.getAudioContext();
+        if (!audioContext) {
+            console.warn("Player: AudioContext not available for loading sounds.");
+            return;
         }
-        
-        this.createFootstepSounds();
-        this.createJumpSound();
-        this.createLandSound();
-    }
-    
-    createFootstepSounds() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.2, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
-            data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (buffer.length * 0.1));
+
+        // Create Footstep Sound Buffer
+        let bufferData = new Float32Array(audioContext.sampleRate * 0.2);
+        for (let i = 0; i < bufferData.length; i++) {
+            bufferData[i] = (Math.random() * 0.5 - 0.25) * Math.exp(-i / (bufferData.length * 0.2));
         }
-        
-        this.footstepBuffer = buffer;
-    }
-    
-    createJumpSound() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.3, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
+        this.footstepBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.footstepBuffer.copyToChannel(bufferData, 0);
+
+        // Create Jump Sound Buffer
+        bufferData = new Float32Array(audioContext.sampleRate * 0.3);
+        for (let i = 0; i < bufferData.length; i++) {
             const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 200) * Math.exp(-t * 10) * 0.5;
+            bufferData[i] = Math.sin(t * 250 + Math.sin(t*50)*0.1) * Math.exp(-t * 15) * 0.3;
         }
-        
-        this.jumpBuffer = buffer;
-    }
-    
-    createLandSound() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.4, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
+        this.jumpBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.jumpBuffer.copyToChannel(bufferData, 0);
+
+        // Create Land Sound Buffer
+        bufferData = new Float32Array(audioContext.sampleRate * 0.4);
+        for (let i = 0; i < bufferData.length; i++) {
             const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 100) * Math.exp(-t * 5) * 0.8;
+            bufferData[i] = (Math.random() * 0.6 - 0.3) * Math.exp(-t * 10) * 0.4; // More thud-like
         }
-        
-        this.landBuffer = buffer;
+        this.landBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.landBuffer.copyToChannel(bufferData, 0);
     }
     
     playFootstep() {
-        if (window.audioContext && this.footstepBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.footstepBuffer;
-            gainNode.gain.value = this.isRunning ? 0.4 : 0.2;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.footstepBuffer) {
+            const volume = this.isRunning ? 0.35 : 0.18;
+            this.audioManager.playSound(this.footstepBuffer, { volume });
             
             // Broadcast footstep sound to other players
             if (this.room) {
                 this.room.send({
                     type: 'footstep',
                     position: this.position,
-                    volume: this.isRunning ? 0.4 : 0.2
+                    volume: volume
                 });
             }
         }
     }
     
     playJumpSound() {
-        if (window.audioContext && this.jumpBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.jumpBuffer;
-            gainNode.gain.value = 0.3;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.jumpBuffer) {
+            this.audioManager.playSound(this.jumpBuffer, { volume: 0.25 });
         }
     }
     
     playLandSound() {
-        if (window.audioContext && this.landBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.landBuffer;
-            gainNode.gain.value = 0.4;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.landBuffer) {
+            this.audioManager.playSound(this.landBuffer, { volume: 0.3 });
         }
     }
     
@@ -374,41 +363,93 @@ export class Player {
     }
     
     checkCollisions() {
+        // Iterate through all potential collision objects provided to the player
         for (const obj of this.collisionObjects) {
+            // Skip objects marked as 'ground' for this type of collision handling
+            // Ground collision is handled by checkGrounded
             if (obj.isGround) continue;
-            
+
+            // Assuming obj has a 'position' (THREE.Vector3) and 'radius' (number)
+            if (!obj.position || typeof obj.radius === 'undefined') {
+                // console.warn("Player.checkCollisions: Collision object missing position or radius", obj);
+                continue;
+            }
+
+            // Calculate distance from player's logical center (this.position) to the object's center.
+            // this.position is assumed to be the reference point for horizontal collisions.
             const distance = this.position.distanceTo(obj.position);
-            if (distance < obj.radius + 0.5) {
-                // Calculate push direction
-                const pushDir = this.position.clone().sub(obj.position).normalize();
-                const pushDistance = (obj.radius + 0.5) - distance;
-                
-                // Push player away from object
-                this.position.add(pushDir.multiplyScalar(pushDistance));
-                
-                // Zero out velocity in collision direction
-                const dot = this.velocity.dot(pushDir);
-                if (dot < 0) {
-                    this.velocity.sub(pushDir.multiplyScalar(dot));
+
+            // Use the class property for player's effective radius.
+            const minDistance = obj.radius + this.playerCollisionRadius;
+
+            if (distance < minDistance) {
+                // Collision detected
+                const pushDirection = this.position.clone().sub(obj.position).normalize();
+                // Ensure pushDirection is not a zero vector (e.g., if positions are identical to an extreme precision)
+                if (pushDirection.lengthSq() === 0) {
+                    // Avoid division by zero or NaN issues if positions are exactly the same.
+                    // Push in a random horizontal direction as a fallback.
+                    pushDirection.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+                }
+                const overlap = minDistance - distance;
+
+                // Push player away from object by the overlap amount.
+                // This is a simple spring-like response. More advanced physics would handle this differently.
+                this.position.add(pushDirection.multiplyScalar(overlap));
+
+                // Dampen velocity component that is pushing into the object.
+                // This helps prevent jittering and allows sliding along surfaces.
+                const velocityComponentAlongPushDir = this.velocity.dot(pushDirection);
+                if (velocityComponentAlongPushDir < 0) { // If velocity is directed into the object
+                    this.velocity.sub(pushDirection.multiplyScalar(velocityComponentAlongPushDir));
                 }
             }
         }
     }
     
     checkGrounded() {
-        this.groundCheckRay.ray.origin.copy(this.position);
-        this.groundCheckRay.ray.direction.set(0, -1, 0);
+        // Set raycaster origin. If this.position is at the base of the player (feet level),
+        // a small upward offset for the ray origin prevents it starting inside the ground geometry.
+        const rayOrigin = this.position.clone();
+        rayOrigin.y += 0.1; // Small offset upwards from player's logical base position.
+
+        this.groundCheckRay.ray.origin.copy(rayOrigin);
+        this.groundCheckRay.ray.direction.set(0, -1, 0); // Cast downwards.
+
+        // Filter for ground objects that have a mesh to intersect with.
+        const groundMeshes = this.collisionObjects
+            .filter(obj => obj && obj.isGround && obj.mesh) // Added obj null check for safety.
+            .map(obj => obj.mesh);
+
+        if (groundMeshes.length === 0) {
+            this.isGrounded = false; // No ground meshes to check against.
+            return;
+        }
         
-        const intersects = this.groundCheckRay.intersectObjects(
-            this.collisionObjects.filter(obj => obj.isGround).map(obj => obj.mesh)
-        );
-        
-        if (intersects.length > 0 && intersects[0].distance <= 2) {
+        const intersects = this.groundCheckRay.intersectObjects(groundMeshes, false); // Non-recursive check.
+
+        // Define how far down to check for ground from the rayOrigin.
+        // If player's feet are at this.position.y, and rayOrigin is at this.position.y + 0.1,
+        // then an intersection distance of 0.1 means the feet are exactly on the ground.
+        // A threshold slightly larger than this (e.g., 0.2) allows for small slopes or imperfections
+        // without the player toggling between grounded and not_grounded state rapidly.
+        const groundDetectionThreshold = 0.2; // (rayOrigin offset + minor penetration/slope allowance).
+
+        if (intersects.length > 0 && intersects[0].distance <= groundDetectionThreshold) {
             if (!this.isGrounded) {
+                // Player just landed.
                 this.playLandSound();
+                // Could also reset jump counts or trigger landing animations here.
             }
             this.isGrounded = true;
-            this.velocity.y = 0;
+            this.velocity.y = 0; // Stop downward movement when grounded.
+
+            // Optional: Snap player's base to the exact ground surface point.
+            // This can provide a more 'stuck to ground' feel but might be jittery on complex surfaces
+            // or if groundDetectionThreshold is too large. Use with caution.
+            // Example: this.position.y = rayOrigin.y - intersects[0].distance;
+            // (This assumes this.position.y is the very bottom of the player model).
+
         } else {
             this.isGrounded = false;
         }
@@ -488,21 +529,29 @@ export class Player {
         // Increase fear when near the seeker
         if (gameState.phase === 'seeking') {
             let nearestSeekerDistance = Infinity;
-            
+
             // Check distance to AI seeker
-            if (gameState.aiSeeker) {
+            if (gameState.aiSeeker && gameState.aiSeeker.position) { // Added null check for aiSeeker and position
                 const distance = this.position.distanceTo(gameState.aiSeeker.position);
                 nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
             }
             
             // Check distance to player seekers
-            for (const seekerId of gameState.seekers) {
-                const seeker = this.room.presence[seekerId];
-                if (seeker && seeker.position) {
-                    const distance = this.position.distanceTo(
-                        new THREE.Vector3(seeker.position.x, seeker.position.y, seeker.position.z)
-                    );
-                    nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
+            if (gameState.seekers && Array.isArray(gameState.seekers)) { // Added check for seekers array
+                for (const seekerId of gameState.seekers) {
+                    const seeker = this.room && this.room.presence ? this.room.presence[seekerId] : undefined; // Added check for room and presence
+                    if (seeker && seeker.position) {
+                        // Ensure seeker.position has x, y, z before creating Vector3
+                        if (typeof seeker.position.x === 'number' &&
+                            typeof seeker.position.y === 'number' &&
+                            typeof seeker.position.z === 'number') {
+                            const seekerPosition = new THREE.Vector3(seeker.position.x, seeker.position.y, seeker.position.z);
+                            const distance = this.position.distanceTo(seekerPosition);
+                            nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
+                        } else {
+                            // console.warn('Player.updateFear: Seeker position is invalid', seekerId, seeker.position);
+                        }
+                    }
                 }
             }
             

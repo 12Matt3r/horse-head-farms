@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 
 export class AISeeker {
-    constructor(scene, environment) {
+    constructor(scene, environment, audioManager) {
         this.scene = scene;
         this.environment = environment;
+        this.audioManager = audioManager; // Store AudioManager instance
         
         this.position = new THREE.Vector3(0, 2, 0);
         this.rotation = 0;
@@ -28,6 +29,12 @@ export class AISeeker {
         // AI decision making
         this.lastDecisionTime = 0;
         this.decisionInterval = 1000; // Make decisions every second
+
+        // Stuck detection
+        this.stuckCheckTimer = 0;
+        this.stuckCheckInterval = 2; // Seconds
+        this.lastPositionForStuckCheck = new THREE.Vector3();
+        this.stuckCounter = 0;
         
         // Visual representation
         this.createVisual();
@@ -81,39 +88,52 @@ export class AISeeker {
         this.scene.add(this.visual);
         
         // Sound effects
-        this.setupAudio();
+        this.breathBuffer = null;
+        this.stepBuffer = null;
+        this.catchBuffer = null;
+        this.loadSounds(); // Method to load sounds
     }
-    
-    setupAudio() {
-        if (!window.audioContext) {
-            window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    async loadSounds() {
+        if (!this.audioManager) return;
+
+        const audioContext = this.audioManager.getAudioContext();
+        if (!audioContext) {
+            console.warn("AISeeker: AudioContext not available for loading sounds.");
+            return;
         }
-        
-        this.createSeekerSounds();
-    }
-    
-    createSeekerSounds() {
-        // Heavy breathing sound
-        const audioContext = window.audioContext;
-        const breathBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 2, audioContext.sampleRate);
-        const breathData = breathBuffer.getChannelData(0);
-        
-        for (let i = 0; i < breathBuffer.length; i++) {
+
+        // Create Breathing Sound Buffer
+        let bufferData = new Float32Array(audioContext.sampleRate * 2.5); // Longer breath
+        for (let i = 0; i < bufferData.length; i++) {
             const t = i / audioContext.sampleRate;
-            breathData[i] = Math.sin(t * Math.PI * 0.5) * 0.3 * Math.random();
+            // Low-frequency oscillation with some noise
+            bufferData[i] = (Math.sin(t * Math.PI * 0.4) + (Math.random() - 0.5) * 0.2) * 0.2 * Math.exp(-t * 0.2);
         }
-        
-        this.breathBuffer = breathBuffer;
-        
-        // Footstep sound (heavier than player)
-        const stepBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.3, audioContext.sampleRate);
-        const stepData = stepBuffer.getChannelData(0);
-        
-        for (let i = 0; i < stepBuffer.length; i++) {
-            stepData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (stepBuffer.length * 0.05)) * 0.8;
+        this.breathBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.breathBuffer.copyToChannel(bufferData, 0);
+
+        // Create Footstep Sound Buffer (heavier)
+        bufferData = new Float32Array(audioContext.sampleRate * 0.4);
+        for (let i = 0; i < bufferData.length; i++) {
+            const t = i / audioContext.sampleRate;
+            bufferData[i] = (Math.random() * 0.8 - 0.4) * Math.exp(-t * 15); // Louder and more thud
         }
+        this.stepBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.stepBuffer.copyToChannel(bufferData, 0);
         
-        this.stepBuffer = stepBuffer;
+        // Create Catch Sound Buffer
+        bufferData = new Float32Array(audioContext.sampleRate * 1.2);
+        for (let i = 0; i < bufferData.length; i++) {
+            const t = i / audioContext.sampleRate;
+            // Growl/roar like sound
+            let envelope = Math.exp(-t * 2.5);
+            let mainFreq = 80 + Math.sin(t * 10) * 20; // Vibrato
+            let noise = (Math.random() - 0.5) * 0.3;
+            bufferData[i] = (Math.sin(t * mainFreq) * 0.4 + noise) * envelope;
+        }
+        this.catchBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+        this.catchBuffer.copyToChannel(bufferData, 0);
     }
     
     setupPatrolPoints() {
@@ -131,7 +151,8 @@ export class AISeeker {
     }
     
     update(deltaTime, players, gameState) {
-        if (gameState.phase !== 'seeking') {
+        // General Review: Add a check for gameState
+        if (!gameState || gameState.phase !== 'seeking') {
             this.state = 'idle';
             return;
         }
@@ -165,6 +186,30 @@ export class AISeeker {
             
             // Play audio effects
             this.updateAudio(deltaTime);
+
+            // Stuck detection logic
+            this.stuckCheckTimer += deltaTime;
+            if (this.stuckCheckTimer >= this.stuckCheckInterval) {
+                if (this.position.distanceToSquared(this.lastPositionForStuckCheck) < 0.1) { // Moved less than ~0.3 units (sqrt(0.1))
+                    this.stuckCounter++;
+                    if (this.stuckCounter >= 2) { // Stuck for two intervals
+                        console.log("AI Seeker might be stuck, attempting recovery.");
+                        // Example: Turn to a random direction
+                        const randomAngle = (Math.random() - 0.5) * Math.PI; // Random angle between -90 and +90 deg
+                        this.rotation += randomAngle;
+                        // Or, could try to move backward slightly for one frame by inverting velocity briefly
+                        // this.velocity.multiplyScalar(-0.5);
+                        // Ensure this temporary change in velocity is used in the next movement calculation
+                        // or directly adjust position for a small step back.
+                        // For simplicity, a random turn is often a good first step.
+                        this.stuckCounter = 0; // Reset counter
+                    }
+                } else {
+                    this.stuckCounter = 0; // Reset if moved significantly
+                }
+                this.lastPositionForStuckCheck.copy(this.position);
+                this.stuckCheckTimer = 0;
+            }
             
         } catch (error) {
             console.error('Error updating AI seeker:', error);
@@ -208,6 +253,14 @@ export class AISeeker {
         const visible = [];
         
         for (const player of players) {
+            // Ensure player object and its properties are valid
+            if (!player ||
+                typeof player.isAlive !== 'boolean' ||
+                typeof player.isHiding !== 'boolean' ||
+                !player.position) {
+                // console.warn('AISeeker.getVisiblePlayers: Invalid player object or missing properties', player);
+                continue;
+            }
             if (!player.isAlive || player.isHiding) continue;
             
             const distance = this.position.distanceTo(player.position);
@@ -236,14 +289,25 @@ export class AISeeker {
         const audible = [];
         
         for (const player of players) {
+            // Ensure player object and its properties are valid
+            if (!player ||
+                typeof player.isAlive !== 'boolean' ||
+                !player.position) {
+                // console.warn('AISeeker.getAudiblePlayers: Invalid player object or missing properties', player);
+                continue;
+            }
             if (!player.isAlive) continue;
             
             const distance = this.position.distanceTo(player.position);
             
             // Players make noise when running or moving quickly
             let noiseLevel = 0;
-            if (player.isRunning) noiseLevel = 1;
-            else if (player.velocity && player.velocity.length() > 0.1) noiseLevel = 0.5;
+            // Check if player.isRunning and player.velocity exist and are of expected types
+            if (typeof player.isRunning === 'boolean' && player.isRunning) {
+                noiseLevel = 1;
+            } else if (player.velocity && typeof player.velocity.length === 'function' && player.velocity.length() > 0.1) {
+                noiseLevel = 0.5;
+            }
             
             if (distance < this.hearingDistance * noiseLevel) {
                 audible.push(player);
@@ -291,6 +355,13 @@ export class AISeeker {
             return;
         }
         
+        // General Review: Ensure target.position exists
+        if (!target.position) {
+            // console.warn('AISeeker.chase: Target has no position', target);
+            this.state = 'patrolling'; // Or some other fallback
+            return;
+        }
+
         const direction = target.position.clone().sub(this.position);
         const distance = direction.length();
         
@@ -300,7 +371,10 @@ export class AISeeker {
         } else {
             direction.normalize();
             this.moveTowards(direction, this.runSpeed, deltaTime);
-            this.lastKnownPosition = target.position.clone();
+            // Ensure target.position still exists before cloning for lastKnownPosition
+            if (target.position) {
+                this.lastKnownPosition = target.position.clone();
+            }
         }
     }
     
@@ -332,33 +406,76 @@ export class AISeeker {
     }
     
     moveTowards(direction, speed, deltaTime) {
-        // Simple pathfinding - move towards target while avoiding obstacles
-        this.velocity.x = direction.x * speed;
-        this.velocity.z = direction.z * speed;
-        
-        // Check for obstacles in movement direction
-        this.raycaster.set(this.position, direction);
-        const intersections = this.raycaster.intersectObjects(this.obstacles);
-        
-        if (intersections.length > 0 && intersections[0].distance < 2) {
-            // Obstacle detected, try to go around
-            const avoidDirection = direction.clone();
-            avoidDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4);
-            this.velocity.x = avoidDirection.x * speed * 0.5;
-            this.velocity.z = avoidDirection.z * speed * 0.5;
+        const baseMoveDirection = direction.clone(); // Original desired direction
+        let chosenDirection = baseMoveDirection.clone();
+        let bestDistance = 0; // Store the distance of the chosen clear path
+        let directPathClear = false;
+
+        const feelerAngles = [-Math.PI / 6, 0, Math.PI / 6]; // -30, 0, +30 degrees
+        const feelerDistanceThreshold = 2.5; // How far the feelers check
+        let currentSpeed = speed; // Use a modifiable speed
+
+        // Check direct path first (center feeler)
+        this.raycaster.set(this.position, baseMoveDirection);
+        let intersections = this.raycaster.intersectObjects(this.obstacles, false); // Non-recursive for performance
+
+        if (intersections.length === 0 || intersections[0].distance > feelerDistanceThreshold) {
+            directPathClear = true;
+            bestDistance = intersections.length > 0 ? intersections[0].distance : Infinity;
+            chosenDirection = baseMoveDirection;
         }
+
+        if (!directPathClear) {
+            let foundClearPath = false;
+            // Initialize bestDistance to a very small number if direct path is blocked
+            bestDistance = -1;
+
+            for (let i = 0; i < feelerAngles.length; i++) {
+                const angle = feelerAngles[i];
+                // Skip direct path (angle === 0) if it was already checked and found blocked.
+                // Or rather, ensure we always consider it but update chosenDirection only if it's better.
+                const currentFeelerDirection = baseMoveDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+                this.raycaster.set(this.position, currentFeelerDirection);
+                intersections = this.raycaster.intersectObjects(this.obstacles, false);
+
+                const distance = intersections.length > 0 ? intersections[0].distance : Infinity;
+
+                if (distance > bestDistance) { // If this path is better (clearer or less blocked)
+                    bestDistance = distance;
+                    chosenDirection = currentFeelerDirection;
+                    if (distance > feelerDistanceThreshold) {
+                        foundClearPath = true; // Mark if we found a path considered "clear enough"
+                    }
+                }
+            }
+
+            // If no path is "clear enough" (above threshold), we've chosen the least blocked one.
+            // Now, adjust speed based on how blocked the chosen path is.
+            if (!foundClearPath) {
+                if (bestDistance < 1.0) { // If the best it can do is still very close to an obstacle
+                    currentSpeed *= 0.2; // Drastically reduce speed
+                } else if (bestDistance < feelerDistanceThreshold) { // If path is somewhat blocked but not critically
+                    currentSpeed *= 0.5; // Reduce speed moderately
+                }
+            }
+        }
+
+        // Update velocity based on the chosenDirection and potentially modified speed
+        this.velocity.x = chosenDirection.x * currentSpeed;
+        this.velocity.z = chosenDirection.z * currentSpeed;
         
         // Apply movement
         this.position.x += this.velocity.x * deltaTime;
         this.position.z += this.velocity.z * deltaTime;
         
         // Update rotation to face movement direction
-        if (this.velocity.length() > 0.1) {
+        if (this.velocity.lengthSq() > 0.001) { // Use lengthSq for minor perf gain
             this.rotation = Math.atan2(this.velocity.x, this.velocity.z);
         }
         
-        // Keep on ground
-        this.position.y = 2;
+        // Keep on ground - this might need adjustment if terrain has varying height
+        // For now, assuming obstacles define navigable space and AI stays at its current y.
+        // this.position.y = 2; // Or ensure it's set based on environment data if available
     }
     
     updateVisual() {
@@ -385,47 +502,35 @@ export class AISeeker {
     }
     
     playBreathing() {
-        if (window.audioContext && this.breathBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.breathBuffer;
-            gainNode.gain.value = 0.2;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.breathBuffer) {
+            this.audioManager.playSound(this.breathBuffer, { volume: 0.15, loop: true }); // Loop breathing
         }
     }
     
     playFootstep() {
-        if (window.audioContext && this.stepBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.stepBuffer;
-            gainNode.gain.value = 0.4;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.stepBuffer) {
+            this.audioManager.playSound(this.stepBuffer, { volume: 0.3 });
         }
     }
     
     catchPlayer(player) {
         try {
             // Player caught!
-            if (player.takeDamage) {
+            if (player && typeof player.takeDamage === 'function') { // Added check
                 player.takeDamage(100); // Instant kill
+            } else {
+                console.warn('AISeeker.catchPlayer: Attempted to catch player, but player object or takeDamage method is invalid:', player);
             }
             
             // Broadcast catch event
-            if (this.room) {
+            if (this.room) { // Added check
                 this.room.send({
                     type: 'playerCaught',
-                    playerId: player.id,
-                    position: player.position
+                    playerId: player && player.id ? player.id : 'unknown', // Check player for id
+                    position: player && player.position ? player.position : this.position // Check player for position
                 });
+            } else {
+                console.warn('AISeeker.catchPlayer: this.room is not available to send playerCaught message.');
             }
             
             // Play catch sound effect
@@ -437,26 +542,8 @@ export class AISeeker {
     }
     
     playCatchSound() {
-        // Generate a scary catch sound
-        if (window.audioContext) {
-            const audioContext = window.audioContext;
-            const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 1, audioContext.sampleRate);
-            const data = buffer.getChannelData(0);
-            
-            for (let i = 0; i < buffer.length; i++) {
-                const t = i / audioContext.sampleRate;
-                data[i] = Math.sin(t * 200 + Math.sin(t * 50) * 10) * Math.exp(-t * 2) * 0.5;
-            }
-            
-            const source = audioContext.createBufferSource();
-            const gainNode = audioContext.createGain();
-            
-            source.buffer = buffer;
-            gainNode.gain.value = 0.6;
-            
-            source.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-            source.start();
+        if (this.audioManager && this.catchBuffer) {
+            this.audioManager.playSound(this.catchBuffer, { volume: 0.7 });
         }
     }
     

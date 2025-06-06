@@ -355,29 +355,37 @@ export class GameManager {
     }
     
     updatePlayerList(presence) {
-        const playerListContent = document.getElementById('playerListContent');
+        let playerListContent = document.getElementById('playerListContent');
         if (!playerListContent) {
             // Create player list if it doesn't exist
             this.createPlayerListUI();
-            return;
+            playerListContent = document.getElementById('playerListContent'); // Re-fetch after creation
+            if (!playerListContent) return; // Still not found, abort
         }
         
-        playerListContent.innerHTML = '';
+        playerListContent.innerHTML = ''; // Clear previous list
         
         for (const [playerId, playerData] of Object.entries(presence)) {
             const peer = this.room.peers[playerId];
-            if (!peer) continue;
+            if (!peer || !peer.username) continue; // Skip if peer data or username is missing
             
             const playerDiv = document.createElement('div');
-            playerDiv.style.margin = '5px 0';
+            playerDiv.classList.add('player-list-item');
+
+            const usernameSpan = document.createElement('span');
+            usernameSpan.classList.add('username');
             
             const role = playerData.role || 'waiting';
-            const roleClass = `role-${role}`;
-            
-            playerDiv.innerHTML = `
-                <span class="${roleClass}">${peer.username}</span>
-                <small style="color: #888;"> (${role})</small>
-            `;
+            const roleClass = `role-${role}`; // e.g., role-hider, role-seeker
+            usernameSpan.classList.add(roleClass);
+            usernameSpan.textContent = peer.username;
+
+            const roleSpan = document.createElement('small');
+            roleSpan.classList.add('role-text');
+            roleSpan.textContent = ` (${role})`;
+
+            playerDiv.appendChild(usernameSpan);
+            playerDiv.appendChild(roleSpan);
             
             playerListContent.appendChild(playerDiv);
         }
@@ -395,11 +403,13 @@ export class GameManager {
         if (ui && !document.getElementById('playerListContent')) {
             const playerList = document.createElement('div');
             playerList.id = 'playerListContent';
-            playerList.style.background = 'rgba(0, 0, 0, 0.7)';
-            playerList.style.padding = '10px';
-            playerList.style.borderRadius = '4px';
-            playerList.style.border = '1px solid #ff0000';
-            playerList.style.marginTop = '10px';
+            playerList.classList.add('player-list-container'); // Apply the new class
+            // Remove direct styling:
+            // playerList.style.background = 'rgba(0, 0, 0, 0.7)';
+            // playerList.style.padding = '10px';
+            // playerList.style.borderRadius = '4px';
+            // playerList.style.border = '1px solid #ff0000';
+            // playerList.style.marginTop = '10px';
             ui.appendChild(playerList);
         }
     }
