@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 
 export class Player {
     constructor(scene, camera, renderer, room) {
@@ -35,12 +36,15 @@ export class Player {
         this.groundCheckRay = new THREE.Raycaster();
         this.isGrounded = false;
         
-        // Camera controls
-        this.mouseSensitivity = 0.002;
+        // Camera controls / PointerLockControls
         this.pitchObject = new THREE.Object3D();
-        this.yawObject = new THREE.Object3D();
+        this.yawObject = new THREE.Object3D(); // This will be controlled by PointerLockControls
+        this.yawObject.position.y = 2; // Initial height
         this.yawObject.add(this.pitchObject);
-        this.pitchObject.add(camera);
+        this.pitchObject.add(this.camera); // Attach camera to pitchObject
+
+        this.controls = new PointerLockControls(this.yawObject, renderer.domElement);
+        this.scene.add(this.yawObject); // Add yawObject to the scene
         
         // Sound effects
         this.setupAudio();
@@ -80,6 +84,16 @@ export class Player {
     }
     
     setupControls() {
+        // Crosshair and instructions Menu
+        this.crosshair = document.getElementById('crosshair');
+        this.instructionsMenu = document.getElementById('instructionsMenu');
+        if (!this.crosshair || !this.instructionsMenu) {
+            console.warn("UI elements (crosshair, instructionsMenu) not found. Make sure they exist in your HTML.");
+        } else {
+            this.instructionsMenu.style.display = 'block'; // Show instructions initially
+            this.crosshair.style.display = 'none'; // Hide crosshair initially
+        }
+
         // Keyboard state
         this.keys = {
             forward: false,
@@ -95,22 +109,29 @@ export class Player {
         // Event listeners
         document.addEventListener('keydown', (e) => this.onKeyDown(e));
         document.addEventListener('keyup', (e) => this.onKeyUp(e));
-        document.addEventListener('mousemove', (e) => this.onMouseMove(e));
         document.addEventListener('mousedown', (e) => this.onMouseDown(e));
         document.addEventListener('mouseup', (e) => this.onMouseUp(e));
         
-        // Lock pointer on click
+        // Pointer lock event listeners
         this.renderer.domElement.addEventListener('click', () => {
-            this.renderer.domElement.requestPointerLock();
+            this.controls.lock();
+        });
+
+        this.controls.addEventListener('lock', () => {
+            console.log('Pointer locked');
+            if (this.instructionsMenu) this.instructionsMenu.style.display = 'none';
+            if (this.crosshair) this.crosshair.style.display = 'block';
+        });
+
+        this.controls.addEventListener('unlock', () => {
+            console.log('Pointer unlocked');
+            if (this.instructionsMenu) this.instructionsMenu.style.display = 'block';
+            if (this.crosshair) this.crosshair.style.display = 'none';
+            // Optionally, you might want to bring up a pause menu or similar UI here
         });
         
-        // Handle pointer lock change
-        document.addEventListener('pointerlockchange', () => {
-            if (document.pointerLockElement === this.renderer.domElement) {
-                this.controls.enabled = true;
-            } else {
-                this.controls.enabled = false;
-            }
+        document.addEventListener('pointerlockerror', (e) => {
+            console.error('PointerLockError:', e);
         });
     }
     
@@ -271,14 +292,6 @@ export class Player {
         }
     }
     
-    onMouseMove(event) {
-        if (document.pointerLockElement === this.renderer.domElement) {
-            this.yawObject.rotation.y -= event.movementX * this.mouseSensitivity;
-            this.pitchObject.rotation.x -= event.movementY * this.mouseSensitivity;
-            this.pitchObject.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitchObject.rotation.x));
-        }
-    }
-    
     onMouseDown(event) {
         if (event.button === 0) { // Left click
             this.tryHide();
@@ -338,13 +351,28 @@ export class Player {
             this.isRunning = false;
         }
         
-        // Transform direction relative to camera
-        const rotation = new THREE.Euler(0, this.yawObject.rotation.y, 0, 'YXZ');
-        this.moveDirection.applyEuler(rotation);
-        
+        // Get camera direction
+        const forward = new THREE.Vector3();
+        this.camera.getWorldDirection(forward);
+        forward.y = 0; // Zero out Y component for XZ plane movement
+        forward.normalize();
+
+        // Calculate right vector
+        const right = new THREE.Vector3();
+        right.crossVectors(this.camera.up, forward).normalize(); // Use camera.up instead of a fixed up vector
+
+        // Combine inputs with forward and right vectors
+        const moveX = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
+        const moveZ = (this.keys.forward ? 1 : 0) - (this.keys.backward ? 1 : 0);
+
+        const worldMoveDirection = new THREE.Vector3();
+        worldMoveDirection.addScaledVector(forward, moveZ);
+        worldMoveDirection.addScaledVector(right, -moveX); // Negate moveX for correct right/left
+        worldMoveDirection.normalize();
+
         // Apply movement to velocity
-        this.velocity.x = this.moveDirection.x * speed;
-        this.velocity.z = this.moveDirection.z * speed;
+        this.velocity.x = worldMoveDirection.x * speed;
+        this.velocity.z = worldMoveDirection.z * speed;
         
         // Apply gravity
         if (!this.isGrounded) {
@@ -359,8 +387,13 @@ export class Player {
         
         // Update visual and camera
         this.visual.position.copy(this.position);
-        this.yawObject.position.copy(this.position);
         
+        // Synchronize PointerLockControls object (yawObject) with the player's logical position + view height
+        const viewHeight = this.isCrouching ? 1.0 : 1.6; // Use the same logic as in toggleCrouch
+        this.yawObject.position.x = this.position.x;
+        this.yawObject.position.y = this.position.y + viewHeight;
+        this.yawObject.position.z = this.position.z;
+
         // Check if grounded
         this.checkGrounded();
         
@@ -426,10 +459,18 @@ export class Player {
     toggleCrouch() {
         this.isCrouching = this.keys.crouch;
         
-        // Adjust camera height
-        const targetY = this.isCrouching ? 1 : 2;
-        this.pitchObject.position.y = targetY;
-        
+        // Adjust camera height (relative to yawObject's new position management)
+        // The camera is child of pitchObject, pitchObject is child of yawObject.
+        // Crouching should lower the camera view by adjusting pitchObject's local Y or player's base position.
+        // For simplicity, if player's position.y is the base (feet), camera is at position.y + some_height.
+        // PointerLockControls moves yawObject. We set yawObject.position.y to player.position.y + view_height.
+        // So, when crouching, we should change the view_height offset.
+        const viewHeight = this.isCrouching ? 1.0 : 1.6; // Example heights
+        this.yawObject.position.y = this.position.y + viewHeight;
+        // No change needed for this.pitchObject.position.y if it's meant for head model offset not view height.
+        // If pitchObject.position.y was used for view height:
+        // this.pitchObject.position.y = this.isCrouching ? -0.6 : 0; // assuming default is part of viewHeight
+
         // Adjust collision height if needed
         // ...
     }
