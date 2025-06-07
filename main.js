@@ -53,8 +53,8 @@ class HorseHeadFarms {
             // Create game components
             // Pass the cannon world to environment and player
             this.environment = new Environment(this.scene, this.world);
-            // Pass audioManager and world to Player and AISeeker
-            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager, this.world);
+            // Pass audioManager, world, and environment to Player
+            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager, this.world, this.environment);
             this.aiSeeker = new AISeeker(this.scene, this.environment, this.audioManager, this.world); // Assuming AISeeker might also need the world
             this.gameManager = new GameManager(this.room, this.player, this.aiSeeker, this.environment);
             

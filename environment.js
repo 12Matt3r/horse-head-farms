@@ -16,6 +16,7 @@ export class Environment {
         this.collisionObjects = []; // This might store CANNON.Body references if needed elsewhere, or become obsolete.
         this.hidingSpots = [];
         this.spawnPoints = [];
+        this.dynamicHideZones = []; // For dynamic hiding opportunities
         
         this.setupLighting();
         this.setupFog();
@@ -788,9 +789,28 @@ export class Environment {
             
             // Some bushes are hiding spots
             if (Math.random() < 0.2) {
-                this.hidingSpots.push(bush.position.clone());
+                // this.hidingSpots.push(bush.position.clone()); // Keep for original logic if needed
+                this.dynamicHideZones.push({
+                    type: 'sphere',
+                    center: bush.position.clone(),
+                    radius: bush.geometry.parameters.radius * 1.5, // A bit larger than visual for easier entry
+                    stealthBonus: 15
+                });
             }
         }
+        // Add a couple of predefined box zones for testing
+        this.dynamicHideZones.push({
+            type: 'box',
+            min: new THREE.Vector3(-5, 0, -5),
+            max: new THREE.Vector3(-2, 2, -2),
+            stealthBonus: 20
+        });
+        this.dynamicHideZones.push({
+            type: 'sphere',
+            center: new THREE.Vector3(10, 1, 10),
+            radius: 3,
+            stealthBonus: 25
+        });
     }
     
     createBush() {
@@ -1000,6 +1020,10 @@ export class Environment {
     
     getHidingSpots() {
         return this.hidingSpots;
+    }
+
+    getDynamicHideZones() {
+        return this.dynamicHideZones;
     }
     
     getRandomSpawnPoint() {

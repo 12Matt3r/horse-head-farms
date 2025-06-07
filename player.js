@@ -2,13 +2,14 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 
 export class Player {
-    constructor(scene, camera, renderer, room, audioManager, world) {
+    constructor(scene, camera, renderer, room, audioManager, world, environment) { // Added environment
         this.scene = scene;
         this.camera = camera;
         this.renderer = renderer;
         this.room = room;
         this.audioManager = audioManager; // Store AudioManager instance
         this.world = world; // Cannon.js world
+        this.environment = environment; // Store environment instance
 
         // this.position = new THREE.Vector3(0, 2, 0); // Replaced by Cannon body
         // this.velocity = new THREE.Vector3(); // Replaced by Cannon body
@@ -23,6 +24,14 @@ export class Player {
         this.isHiding = false;
         this.isRunning = false;
         this.isCrouching = false;
+
+        // Stealth properties
+        this.stealthLevel = 0;
+        this.maxStealth = 100;
+        this.minStealth = 0;
+        this.inHideSpot = false;
+        this.inDynamicHideZone = false; // For dynamic zones
+        this.currentDynamicZoneBonus = 0; // Bonus from current dynamic zone
         
         // Movement parameters
         this.walkSpeed = 5; // Target speed
@@ -73,6 +82,80 @@ export class Player {
         
         // Setup controls
         this.setupControls();
+
+        this.updateStealth(); // Initialize stealth level
+    }
+
+    updateStealth() {
+      let baseStealth = this.inHideSpot ? 85 : 5; // Base stealth on being in a designated hide spot
+
+      // Add bonus from dynamic hide zone
+      if (this.inDynamicHideZone) {
+        baseStealth += this.currentDynamicZoneBonus;
+      }
+
+      if (this.isCrouching) {
+        baseStealth += 15; // Bonus for crouching
+      }
+
+      // Penalty for movement
+      if (this.body && this.body.velocity) {
+        const speed = this.body.velocity.length(); // Use .length() for CANNON.Vec3
+        if (speed > 0.1 && speed <= 2.5) { // Walking speed
+          baseStealth -= 5;
+        } else if (speed > 2.5) { // Running speed
+          baseStealth -= 15;
+        }
+      }
+
+      this.stealthLevel = Math.max(this.minStealth, Math.min(this.maxStealth, baseStealth));
+      this.isHiding = this.stealthLevel >= 90; // Update isHiding based on stealth level
+    }
+
+    checkDynamicHideZones() {
+        if (!this.environment || !this.body) {
+            this.inDynamicHideZone = false;
+            this.currentDynamicZoneBonus = 0;
+            return;
+        }
+
+        const dynamicZones = this.environment.getDynamicHideZones();
+        if (!dynamicZones || dynamicZones.length === 0) {
+            this.inDynamicHideZone = false;
+            this.currentDynamicZoneBonus = 0;
+            return;
+        }
+
+        const playerPosition = this.getPosition(); // Current player position (THREE.Vector3)
+        let bestBonus = 0;
+        let inAnyZone = false;
+
+        for (const zone of dynamicZones) {
+            let playerInThisZone = false;
+            if (zone.type === 'sphere') {
+                if (playerPosition.distanceTo(zone.center) < zone.radius) {
+                    playerInThisZone = true;
+                }
+            } else if (zone.type === 'box') {
+                if (
+                    playerPosition.x >= zone.min.x && playerPosition.x <= zone.max.x &&
+                    playerPosition.y >= zone.min.y && playerPosition.y <= zone.max.y &&
+                    playerPosition.z >= zone.min.z && playerPosition.z <= zone.max.z
+                ) {
+                    playerInThisZone = true;
+                }
+            }
+
+            if (playerInThisZone) {
+                inAnyZone = true;
+                if (zone.stealthBonus > bestBonus) {
+                    bestBonus = zone.stealthBonus;
+                }
+            }
+        }
+
+        this.inDynamicHideZone = inAnyZone;
+        this.currentDynamicZoneBonus = inAnyZone ? bestBonus : 0;
     }
 
     createPhysicsBody() {
@@ -336,8 +419,11 @@ export class Player {
         if (!this.isAlive || !this.body) return; // Ensure physics body exists
         
         try {
+            // Check for dynamic hide zones first, so its bonus is available for updateStealth
+            this.checkDynamicHideZones();
+
             // Process inputs and update physics body's velocity
-            this.updateMovement(deltaTime);
+            this.updateMovement(deltaTime); // This method calls updateStealth()
             
             // Check if player is grounded using Cannon.js raycast
             this.checkGrounded();
@@ -358,6 +444,22 @@ export class Player {
             this.updateFear(deltaTime, gameState); // Uses this.body.position via getPosition()
             this.updateAnimations(deltaTime);      // Head bob, uses this.body.velocity
             this.updateNetworkPresence();          // Uses this.body.position
+
+            // Update visual opacity based on stealth level
+            if (this.visual) {
+                const opacity = 1 - (this.stealthLevel / this.maxStealth);
+                this.visual.traverse(child => {
+                    if (child.isMesh) {
+                        child.material.opacity = opacity;
+                        // Ensure material is transparent for opacity to work.
+                        // This should ideally be set once at material creation,
+                        // but double-checking here or ensuring it in createVisual is fine.
+                        if (!child.material.transparent) {
+                            child.material.transparent = true;
+                        }
+                    }
+                });
+            }
             
         } catch (error) {
             console.error('Error updating player:', error);
@@ -405,6 +507,9 @@ export class Player {
                 this.lastStepTime = Date.now();
             }
         }
+        // updateStealth is called here, which is good.
+        // checkDynamicHideZones should be called before this in the main update loop.
+        this.updateStealth();
     }
     
     // checkCollisions() is removed as Cannon.js handles general collisions.
@@ -484,36 +589,47 @@ export class Player {
         // TODO: Implement physics body shape change for crouching.
         // This is more complex: involves changing CANNON.Shape, possibly re-adding the body.
         // For now, only the camera height and speed are affected.
+        this.updateStealth(); // Update stealth after crouching state changes
     }
     
     tryHide() {
-        if (this.isHiding) {
-            this.unhide();
-            return;
-        }
-        
-        // Check if near a hiding spot
-        for (const spot of this.hideSpots) {
-            const distance = this.position.distanceTo(spot);
-            if (distance < 2) {
-                this.hide();
-                return;
+        // If already in a hide spot and trying to hide again, or if simply trying to unhide
+        if (this.inHideSpot || this.isHiding) {
+            this.unhide(); // This will set inHideSpot = false and update stealth
+        } else {
+            // Check if near a hiding spot
+            // Assuming this.hideSpots contains objects with a 'position' (THREE.Vector3) and 'radius'
+            let inSpot = false;
+            for (const spot of this.hideSpots) {
+                const spotPosition = spot.position || spot; // spot might be a Vector3 or an object with a position property
+                const distance = this.getPosition().distanceTo(spotPosition);
+                const interactionRadius = spot.radius || 2; // Default radius if not specified
+                if (distance < interactionRadius) {
+                    this.hide(); // This will set inHideSpot = true and update stealth
+                    inSpot = true;
+                    break;
+                }
+            }
+            if (!inSpot) { // If no spot found, ensure stealth is updated (e.g. if player thought they were near a spot)
+                this.inHideSpot = false;
+                this.updateStealth();
             }
         }
     }
     
     hide() {
-        this.isHiding = true;
-        if (this.visual) {
-            this.visual.visible = false;
-        }
+        // This method is now primarily called when interaction with a hideSpot is successful
+        this.inHideSpot = true;
+        this.updateStealth();
+        // this.isHiding will be set by updateStealth()
+        // Visual visibility will be handled by update() method based on stealthLevel
     }
     
     unhide() {
-        this.isHiding = false;
-        if (this.visual) {
-            this.visual.visible = true;
-        }
+        this.inHideSpot = false;
+        this.updateStealth();
+        // this.isHiding will be set by updateStealth()
+        // Visual visibility will be handled by update() method based on stealthLevel
     }
     
     tryClimb() {
@@ -630,9 +746,11 @@ export class Player {
                 rotation: { y: this.yawObject.rotation.y }, // Send Euler Y rotation for yaw
                 // Optionally send velocity if server-side validation or other clients need it.
                 // velocity: { x: this.body.velocity.x, y: this.body.velocity.y, z: this.body.velocity.z },
-                isHiding: this.isHiding,
+                isHiding: this.isHiding, // Current hiding state (based on stealth level)
                 isRunning: this.isRunning,
-                isCrouching: this.isCrouching,
+                isCrouching: this.isCrouching, // Crouching state
+                stealthLevel: this.stealthLevel, // Actual stealth value
+                maxStealth: this.maxStealth,     // Max stealth value
                 health: this.health,
                 stamina: this.stamina,
                 fear: this.fear,

@@ -255,18 +255,29 @@ export class AISeeker {
         const visible = [];
         
         for (const player of players) {
-            // Ensure player object and its properties are valid
-            if (!player ||
-                typeof player.isAlive !== 'boolean' ||
-                typeof player.isHiding !== 'boolean' ||
-                !player.position) {
-                // console.warn('AISeeker.getVisiblePlayers: Invalid player object or missing properties', player);
+            if (!player || !player.isAlive || !player.position || player.stealthLevel === undefined || player.maxStealth === undefined) {
+                // console.warn('AISeeker.getVisiblePlayers: Invalid player object or missing stealth properties', player);
                 continue;
             }
-            if (!player.isAlive || player.isHiding) continue;
-            
+
             const distance = this.position.distanceTo(player.position);
-            if (distance > this.viewDistance) continue;
+            const playerStealthLevel = player.stealthLevel || 0;
+            const playerMaxStealth = player.maxStealth || 100;
+
+            // Extremely close players might be detected even with high stealth, but still need LoS
+            if (playerStealthLevel >= 90 && distance <= 3) {
+                // Proceed to LoS check for very stealthy but close players
+            } else {
+                // Standard detection logic
+                if (distance > this.viewDistance) continue;
+
+                const baseDetectionChance = 1.0; // Could be tied to distance if desired
+                const detectionChance = (1 - (playerStealthLevel / playerMaxStealth)) * baseDetectionChance;
+
+                if (Math.random() >= detectionChance) {
+                    continue; // Failed detection roll
+                }
+            }
             
             // Check if player is within view angle
             const direction = player.position.clone().sub(this.position).normalize();
@@ -276,27 +287,31 @@ export class AISeeker {
             if (angle > this.viewAngle / 2) continue;
             
             // Check line of sight using Cannon.js raycast
-            const rayFrom = new CANNON.Vec3(this.position.x, this.position.y, this.position.z);
-            // Assuming player.position is a THREE.Vector3, needs conversion if player object also uses Cannon body.
-            // For now, assume player.position is the target point.
-            const playerPosition = player.getPosition ? player.getPosition() : player.position; // Adapt if player has getPosition() for its body
-            const rayTo = new CANNON.Vec3(playerPosition.x, playerPosition.y, playerPosition.z);
+            // AI's "eye" position for raycasting. Adjust Y if AI model's eyes are significantly offset.
+            const aiEyePosition = new CANNON.Vec3(this.position.x, this.position.y + 1.5, this.position.z); // Assuming head height
+            const playerPosition = player.getPosition ? player.getPosition() : player.position;
+            const rayTo = new CANNON.Vec3(playerPosition.x, playerPosition.y, playerPosition.z); // Target player's body center
             
             const result = new CANNON.RaycastResult();
             const raycastOptions = {
-                // collisionFilterGroup: undefined, // Define if AI is in a specific group
-                // collisionFilterMask: undefined,  // Define to collide with env + player groups
                 skipBackfaces: true
+                // Potentially add collisionFilterGroup/Mask if AI or players are in specific physics groups
             };
-            this.world.raycastClosest(rayFrom, rayTo, raycastOptions, result);
+            this.world.raycastClosest(aiEyePosition, rayTo, raycastOptions, result);
 
-            // If ray hits something, check if it's closer than the player
-            // A more robust check would be to see if result.body is the player's physics body.
-            if (result.hasHit && result.distance < distance - 0.1) { // -0.1 to avoid self-intersection issues if ray starts inside player
-                // Occluded by an environment object
-            } else {
-                visible.push(player); // No hit, or hit is beyond/at the player
+            if (result.hasHit) {
+                // Calculate distance to hit point
+                const hitPoint = result.hitPointWorld;
+                const distanceToHit = aiEyePosition.distanceTo(hitPoint);
+                const distanceToPlayer = aiEyePosition.distanceTo(rayTo); // Distance to player's center
+
+                // If the hit is closer than the player (with a small tolerance), it's an obstacle.
+                if (distanceToHit < distanceToPlayer - 0.5) { // 0.5 tolerance for player's own body radius etc.
+                    continue; // Occluded
+                }
             }
+            // If no hit, or hit is at/beyond player, player is visible
+            visible.push(player);
         }
         
         return visible;
@@ -306,27 +321,32 @@ export class AISeeker {
         const audible = [];
         
         for (const player of players) {
-            // Ensure player object and its properties are valid
-            if (!player ||
-                typeof player.isAlive !== 'boolean' ||
-                !player.position) {
+            if (!player || !player.isAlive || !player.position ||
+                player.stealthLevel === undefined || player.maxStealth === undefined || player.isCrouching === undefined) {
                 // console.warn('AISeeker.getAudiblePlayers: Invalid player object or missing properties', player);
                 continue;
             }
-            if (!player.isAlive) continue;
             
             const distance = this.position.distanceTo(player.position);
             
-            // Players make noise when running or moving quickly
             let noiseLevel = 0;
-            // Check if player.isRunning and player.velocity exist and are of expected types
-            if (typeof player.isRunning === 'boolean' && player.isRunning) {
-                noiseLevel = 1;
-            } else if (player.velocity && typeof player.velocity.length === 'function' && player.velocity.length() > 0.1) {
+            if (player.isRunning) { // isRunning should be a boolean
+                noiseLevel = 1.0;
+            } else if (player.velocity && typeof player.velocity.length === 'function' && player.velocity.length() > 0.1) { // player.velocity from physics body
                 noiseLevel = 0.5;
             }
+
+            // Reduce noise if crouching
+            if (player.isCrouching) {
+                noiseLevel *= 0.5;
+            }
+
+            // Further reduce noise based on stealth level (e.g., in a good hiding spot)
+            // This reduction is less impactful than crouching, more about general "quietness"
+            const stealthModifier = 1 - (player.stealthLevel / player.maxStealth) * 0.5; // Max stealth reduces by 50%
+            noiseLevel *= stealthModifier;
             
-            if (distance < this.hearingDistance * noiseLevel) {
+            if (noiseLevel > 0 && distance < this.hearingDistance * noiseLevel) {
                 audible.push(player);
             }
         }

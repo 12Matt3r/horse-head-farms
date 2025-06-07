@@ -26,6 +26,8 @@ export class GameManager {
         
         this.setupEventListeners();
         this.setupUI();
+        this.stealthMeterFill = null; // Add for stealth meter
+        this.stealthMeterText = null; // Add for stealth meter text
     }
     
     setupEventListeners() {
@@ -59,6 +61,17 @@ export class GameManager {
     setupUI() {
         this.updateUI();
         setInterval(() => this.updateTimer(), 1000);
+
+        // Get references to stealth meter elements
+        this.stealthMeterFill = document.getElementById('stealthMeterFill');
+        this.stealthMeterText = document.getElementById('stealthMeterText');
+        // Initial update in case UI is setup after player exists
+        if (this.player && this.stealthMeterFill) {
+            const stealthPercentage = (this.player.stealthLevel / this.player.maxStealth) * 100;
+            this.stealthMeterFill.style.width = `${stealthPercentage}%`;
+            if (this.stealthMeterText) this.stealthMeterText.textContent = `Stealth: ${Math.round(stealthPercentage)}%`;
+        }
+
     }
     
     async joinGame() {
@@ -516,6 +529,26 @@ export class GameManager {
             playerRole.textContent = myPresence.role;
             playerRole.className = `role-${myPresence.role}`;
         }
+
+        // Update Stealth Meter
+        if (this.player && this.stealthMeterFill) {
+            const stealthPercentage = (this.player.stealthLevel / this.player.maxStealth) * 100;
+            this.stealthMeterFill.style.width = `${stealthPercentage}%`;
+            // Change color based on stealth level
+            if (stealthPercentage > 80) {
+                this.stealthMeterFill.style.backgroundColor = '#00ffff'; // Cyan for high stealth
+            } else if (stealthPercentage > 50) {
+                this.stealthMeterFill.style.backgroundColor = '#00ff00'; // Green for medium
+            } else {
+                this.stealthMeterFill.style.backgroundColor = '#ffff00'; // Yellow for low
+            }
+            if (this.stealthMeterText) this.stealthMeterText.textContent = `Stealth: ${Math.round(this.player.stealthLevel)}`;
+
+        } else if (this.stealthMeterFill && !this.player) {
+            // Hide or reset if player doesn't exist (e.g. spectator mode or pre-join)
+             this.stealthMeterFill.style.width = '0%';
+             if (this.stealthMeterText) this.stealthMeterText.textContent = `Stealth`;
+        }
     }
     
     updateTimer() {
@@ -620,9 +653,15 @@ export class GameManager {
                         presence.position.y,
                         presence.position.z
                     ),
-                    isHiding: presence.isHiding,
-                    isRunning: presence.isRunning,
-                    velocity: presence.velocity || new THREE.Vector3()
+                    isHiding: presence.isHiding, // From network
+                    isRunning: presence.isRunning || false, // From network, default to false
+                    isCrouching: presence.isCrouching || false, // From network, default to false
+                    stealthLevel: presence.stealthLevel !== undefined ? presence.stealthLevel : 0, // From network, default to 0
+                    maxStealth: presence.maxStealth !== undefined ? presence.maxStealth : 100, // From network, default to 100
+                    // Ensure velocity is a THREE.Vector3. If it's an object {x,y,z}, convert it.
+                    velocity: presence.velocity ?
+                              (presence.velocity instanceof THREE.Vector3 ? presence.velocity : new THREE.Vector3(presence.velocity.x || 0, presence.velocity.y || 0, presence.velocity.z || 0))
+                              : new THREE.Vector3()
                 });
             }
         }
