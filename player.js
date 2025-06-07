@@ -1,15 +1,18 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 
 export class Player {
-    constructor(scene, camera, renderer, room) {
+    constructor(scene, camera, renderer, room, audioManager, world) {
         this.scene = scene;
         this.camera = camera;
         this.renderer = renderer;
         this.room = room;
-        
-        this.position = new THREE.Vector3(0, 2, 0);
-        this.velocity = new THREE.Vector3();
-        this.rotation = new THREE.Euler();
+        this.audioManager = audioManager; // Store AudioManager instance
+        this.world = world; // Cannon.js world
+
+        // this.position = new THREE.Vector3(0, 2, 0); // Replaced by Cannon body
+        // this.velocity = new THREE.Vector3(); // Replaced by Cannon body
+        this.rotation = new THREE.Euler(); // Used for movement direction calculation
         this.moveDirection = new THREE.Vector3();
         
         // Player stats
@@ -22,58 +25,123 @@ export class Player {
         this.isCrouching = false;
         
         // Movement parameters
-        this.walkSpeed = 5;
-        this.runSpeed = 8;
-        this.crouchSpeed = 2;
-        this.jumpForce = 8;
-        this.gravity = 20;
-        
-        // Collision detection
-        this.collisionObjects = [];
+        this.walkSpeed = 5; // Target speed
+        this.runSpeed = 8;  // Target speed
+        this.crouchSpeed = 2; // Target speed
+        this.jumpForce = 350; // Adjusted for impulse
+        // this.gravity = 20; // Handled by Cannon.js world gravity
+
+        // Collision detection related
+        // this.collisionObjects = []; // Will store Cannon.Body instances if needed for specific logic, world handles general collisions.
         this.hideSpots = [];
-        this.raycaster = new THREE.Raycaster();
-        this.groundCheckRay = new THREE.Raycaster();
+        // this.raycaster = new THREE.Raycaster(); // Replaced by Cannon raycasting
+        // this.groundCheckRay = new THREE.Raycaster(); // Replaced by Cannon raycasting
         this.isGrounded = false;
-        
+        this.groundNormal = new CANNON.Vec3(0, 1, 0); // Assuming initially flat ground, or will be updated by checkGrounded
+        this.maxWalkableSlopeAngle = Math.PI / 3.6; // Approx 50 degrees, (Math.PI / 4 is 45 deg)
+
+        this.playerCollisionRadius = 0.4; // Radius of the physics body
+        this.playerHeight = 1.8; // Approximate visual height
+        // this.playerMass = 60; // Mass is set in createPhysicsBody
+
+        // Physics body
+        this.body = null;
+        this.playerMaterial = null;
+        this.bodyShapeType = 'Sphere'; // Default, will be updated in createPhysicsBody
+        this.capsuleCylinderHeight = 0; // For capsule shape calculations
+        this.lastYaw = 0; // For camera sway calculation
+
         // Camera controls
         this.mouseSensitivity = 0.002;
-        this.pitchObject = new THREE.Object3D();
-        this.yawObject = new THREE.Object3D();
+        this.pitchObject = new THREE.Object3D(); // Rotates around X for looking up/down
+        this.yawObject = new THREE.Object3D();   // Rotates around Y for turning left/right
         this.yawObject.add(this.pitchObject);
-        this.pitchObject.add(camera);
+        this.pitchObject.add(this.camera);
+        this.scene.add(this.yawObject); // Add yawObject to scene so it can have a world position that follows the physics body.
         
-        // Sound effects
-        this.setupAudio();
+        // Sound effects - will be loaded using AudioManager
+        this.footstepBuffer = null;
+        this.jumpBuffer = null;
+        this.landBuffer = null;
+        this.loadSounds(); // Method to load sounds
         
+        // Create physics body
+        this.createPhysicsBody(); // New method to encapsulate physics body creation
+
         // Create visual representation
         this.createVisual();
         
         // Setup controls
         this.setupControls();
     }
+
+    createPhysicsBody() {
+        this.playerMaterial = new CANNON.Material("playerMaterial"); // Changed material name
+
+        const radius = this.playerCollisionRadius;
+        const cylinderHeight = this.playerHeight - (2 * radius);
+
+        let playerShape;
+        if (cylinderHeight <= 0) {
+            console.warn("Player capsuleCylinderHeight is zero or negative. Check playerHeight and playerCollisionRadius. Defaulting to sphere.");
+            playerShape = new CANNON.Sphere(radius);
+            this.bodyShapeType = 'Sphere';
+            this.capsuleCylinderHeight = 0;
+        } else {
+            playerShape = new CANNON.Capsule(radius, cylinderHeight);
+            this.bodyShapeType = 'Capsule';
+            this.capsuleCylinderHeight = cylinderHeight;
+        }
+
+        this.body = new CANNON.Body({
+            mass: 70, // Adjusted mass
+            material: this.playerMaterial,
+            shape: playerShape,
+            position: new CANNON.Vec3(0, 5, 0)
+        });
+
+        this.body.linearDamping = 0.8; // Adjusted damping
+        this.body.fixedRotation = true;
+        this.body.allowSleep = false; // Ensure player body is always active
+
+        this.world.addBody(this.body);
+    }
     
     createVisual() {
+        // Visual representation is a capsule. The physics body (Sphere) is centered at this.body.position.
+        // The this.visual (THREE.Group) will have its position updated to match this.body.position.
+        // All visual components are positioned relative to this.visual group.
         const group = new THREE.Group();
         
-        // Player body
-        const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.5, 4, 8);
-        const bodyMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00ff00,
+        // Visual Player Body (Capsule)
+        // Visual radius 0.3, cylinder part height 1.0. Total visual height (1.0 + 2 * 0.3) = 1.6
+        // Physics sphere (radius 0.4) is centered at this.body.position.
+        // The visual capsule should also appear centered around this.body.position.
+        const visualCapsuleRadius = 0.3;
+        const visualCapsuleCylinderHeight = 1.0;
+        const bodyGeom = new THREE.CapsuleGeometry(visualCapsuleRadius, visualCapsuleCylinderHeight, 4, 8);
+        const bodyMat = new THREE.MeshLambertMaterial({
+            color: 0x00ee00, // Brighter green
             transparent: true,
-            opacity: 0.8
+            opacity: 0.6 // Slightly more transparent
         });
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.position.y = 0.75;
-        body.castShadow = true;
-        group.add(body);
-        
-        // Player head
-        const headGeometry = new THREE.SphereGeometry(0.25, 8, 8);
-        const headMaterial = new THREE.MeshLambertMaterial({ color: 0xffddbb });
-        const head = new THREE.Mesh(headGeometry, headMaterial);
-        head.position.y = 1.6;
-        head.castShadow = true;
-        group.add(head);
+        const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
+        // The CapsuleGeometry is centered by default. So, its center aligns with the group's origin (which will be body.position).
+        bodyMesh.position.y = 0;
+        bodyMesh.castShadow = true;
+        group.add(bodyMesh);
+
+        // Visual Player Head (Sphere)
+        const headGeom = new THREE.SphereGeometry(0.25, 8, 8); // Head radius 0.25
+        const headMat = new THREE.MeshLambertMaterial({ color: 0xffddcc, opacity: 0.6, transparent: true });
+        const headMesh = new THREE.Mesh(headGeom, headMat);
+        // Position head on top of the visual capsule body.
+        // Top of capsule's cylinder part is at y = visualCapsuleCylinderHeight / 2.
+        // Top of capsule's upper sphere is at y = (visualCapsuleCylinderHeight / 2) + visualCapsuleRadius.
+        // Center of head (radius 0.25) should be above that.
+        headMesh.position.y = (visualCapsuleCylinderHeight / 2) + visualCapsuleRadius + (0.25 / 2);
+        headMesh.castShadow = true;
+        group.add(headMesh);
         
         this.visual = group;
         this.scene.add(this.visual);
@@ -101,115 +169,88 @@ export class Player {
         
         // Lock pointer on click
         this.renderer.domElement.addEventListener('click', () => {
-            this.renderer.domElement.requestPointerLock();
-        });
-        
-        // Handle pointer lock change
-        document.addEventListener('pointerlockchange', () => {
-            if (document.pointerLockElement === this.renderer.domElement) {
-                this.controls.enabled = true;
-            } else {
-                this.controls.enabled = false;
+            if (document.pointerLockElement !== this.renderer.domElement) {
+                 this.renderer.domElement.requestPointerLock();
             }
         });
+
+        // Handle pointer lock change - this.controls is not used in this class for now
+        // document.addEventListener('pointerlockchange', () => {
+        //     if (document.pointerLockElement === this.renderer.domElement) {
+        //         // e.g., this.controls.enabled = true; if using a PointerLockControls instance
+        //     } else {
+        //         // e.g., this.controls.enabled = false;
+        //     }
+        // });
     }
-    
-    setupAudio() {
-        if (!window.audioContext) {
-            window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    async loadSounds() {
+        if (!this.audioManager) return;
+        const audioContext = this.audioManager.getAudioContext();
+        if (!audioContext) {
+            console.warn("Player: AudioContext not available for loading sounds.");
+            return;
         }
-        
-        this.createFootstepSounds();
-        this.createJumpSound();
-        this.createLandSound();
-    }
-    
-    createFootstepSounds() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.2, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
-            data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (buffer.length * 0.1));
+
+        try {
+            // Using generated sounds for now, ideally load from files:
+            // this.footstepBuffer = await this.audioManager.loadSound('sounds/footstep.wav');
+            // this.jumpBuffer = await this.audioManager.loadSound('sounds/jump.wav');
+            // this.landBuffer = await this.audioManager.loadSound('sounds/land.wav');
+
+            let bufferData = new Float32Array(audioContext.sampleRate * 0.2);
+            for (let i = 0; i < bufferData.length; i++) {
+                bufferData[i] = (Math.random() * 0.5 - 0.25) * Math.exp(-i / (bufferData.length * 0.2));
+            }
+            this.footstepBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+            this.footstepBuffer.copyToChannel(bufferData, 0);
+
+            bufferData = new Float32Array(audioContext.sampleRate * 0.3);
+            for (let i = 0; i < bufferData.length; i++) {
+                const t = i / audioContext.sampleRate;
+                bufferData[i] = Math.sin(t * 250 + Math.sin(t*50)*0.1) * Math.exp(-t * 15) * 0.3;
+            }
+            this.jumpBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+            this.jumpBuffer.copyToChannel(bufferData, 0);
+
+            bufferData = new Float32Array(audioContext.sampleRate * 0.4);
+            for (let i = 0; i < bufferData.length; i++) {
+                const t = i / audioContext.sampleRate;
+                bufferData[i] = (Math.random() * 0.6 - 0.3) * Math.exp(-t * 10) * 0.4; // More thud-like
+            }
+            this.landBuffer = audioContext.createBuffer(1, bufferData.length, audioContext.sampleRate);
+            this.landBuffer.copyToChannel(bufferData, 0);
+
+        } catch (error) {
+            console.error("Error loading player sounds:", error);
         }
-        
-        this.footstepBuffer = buffer;
-    }
-    
-    createJumpSound() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.3, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
-            const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 200) * Math.exp(-t * 10) * 0.5;
-        }
-        
-        this.jumpBuffer = buffer;
-    }
-    
-    createLandSound() {
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.4, audioContext.sampleRate);
-        const data = buffer.getChannelData(0);
-        
-        for (let i = 0; i < buffer.length; i++) {
-            const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 100) * Math.exp(-t * 5) * 0.8;
-        }
-        
-        this.landBuffer = buffer;
     }
     
     playFootstep() {
-        if (window.audioContext && this.footstepBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.footstepBuffer;
-            gainNode.gain.value = this.isRunning ? 0.4 : 0.2;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.footstepBuffer && this.body) {
+            const volume = this.isRunning ? 0.35 : 0.18;
+            this.audioManager.playSound(this.footstepBuffer, { volume });
             
             // Broadcast footstep sound to other players
             if (this.room) {
                 this.room.send({
                     type: 'footstep',
-                    position: this.position,
-                    volume: this.isRunning ? 0.4 : 0.2
+                    position: {x: this.body.position.x, y: this.body.position.y, z: this.body.position.z }, // Send CANNON body position
+                    volume: volume
                 });
             }
         }
     }
     
     playJumpSound() {
-        if (window.audioContext && this.jumpBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.jumpBuffer;
-            gainNode.gain.value = 0.3;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.jumpBuffer) {
+            this.audioManager.playSound(this.jumpBuffer, { volume: 0.25 });
         }
     }
     
     playLandSound() {
-        if (window.audioContext && this.landBuffer) {
-            const source = window.audioContext.createBufferSource();
-            const gainNode = window.audioContext.createGain();
-            
-            source.buffer = this.landBuffer;
-            gainNode.gain.value = 0.4;
-            
-            source.connect(gainNode);
-            gainNode.connect(window.audioContext.destination);
-            source.start();
+        if (this.audioManager && this.landBuffer) {
+            this.audioManager.playSound(this.landBuffer, { volume: 0.3 });
         }
     }
     
@@ -292,23 +333,31 @@ export class Player {
     }
     
     update(deltaTime, gameState) {
-        if (!this.isAlive) return;
+        if (!this.isAlive || !this.body) return; // Ensure physics body exists
         
         try {
-            // Update movement
+            // Process inputs and update physics body's velocity
             this.updateMovement(deltaTime);
             
-            // Update stamina
+            // Check if player is grounded using Cannon.js raycast
+            this.checkGrounded();
+            
+            // Synchronize the Three.js visual model (this.visual) with the Cannon.js physics body (this.body)
+            // This should happen AFTER the physics world has been stepped in the main game loop.
+            this.visual.position.copy(this.body.position);
+            // this.visual.quaternion.copy(this.body.quaternion); // Only needed if fixedRotation = false
+
+            // The this.yawObject (which holds the camera) needs to follow the player's body position.
+            // The actual rotation of yawObject (left/right) and pitchObject (up/down) is handled by mouse input.
+            this.yawObject.position.copy(this.body.position);
+            // Adjust camera height based on player state (e.g. crouching) or offset from body center.
+            // Base y-position for pitchObject is set in updateAnimations or toggleCrouch.
+            
+            // Update other player logic
             this.updateStamina(deltaTime);
-            
-            // Update fear level
-            this.updateFear(deltaTime, gameState);
-            
-            // Update animations
-            this.updateAnimations(deltaTime);
-            
-            // Update network presence
-            this.updateNetworkPresence();
+            this.updateFear(deltaTime, gameState); // Uses this.body.position via getPosition()
+            this.updateAnimations(deltaTime);      // Head bob, uses this.body.velocity
+            this.updateNetworkPresence();          // Uses this.body.position
             
         } catch (error) {
             console.error('Error updating player:', error);
@@ -316,56 +365,41 @@ export class Player {
     }
     
     updateMovement(deltaTime) {
-        // Calculate move direction from input
-        this.moveDirection.set(0, 0, 0);
-        
+        if (!this.body) return;
+
+        this.moveDirection.set(0, 0, 0); // Reset move direction
         if (this.keys.forward) this.moveDirection.z -= 1;
         if (this.keys.backward) this.moveDirection.z += 1;
         if (this.keys.left) this.moveDirection.x -= 1;
         if (this.keys.right) this.moveDirection.x += 1;
-        
-        this.moveDirection.normalize();
-        
-        // Apply movement speed
-        let speed = this.walkSpeed;
-        if (this.keys.run && this.stamina > 0) {
-            speed = this.runSpeed;
-            this.isRunning = true;
+        this.moveDirection.normalize(); // Ensure consistent speed, especially for diagonal movement
+
+        let currentSpeed = this.walkSpeed;
+        this.isRunning = this.keys.run && this.stamina > 0 && !this.isCrouching;
+
+        if (this.isRunning) {
+            currentSpeed = this.runSpeed;
         } else if (this.isCrouching) {
-            speed = this.crouchSpeed;
-            this.isRunning = false;
-        } else {
-            this.isRunning = false;
+            currentSpeed = this.crouchSpeed;
         }
-        
-        // Transform direction relative to camera
-        const rotation = new THREE.Euler(0, this.yawObject.rotation.y, 0, 'YXZ');
-        this.moveDirection.applyEuler(rotation);
-        
-        // Apply movement to velocity
-        this.velocity.x = this.moveDirection.x * speed;
-        this.velocity.z = this.moveDirection.z * speed;
-        
-        // Apply gravity
-        if (!this.isGrounded) {
-            this.velocity.y -= this.gravity * deltaTime;
-        }
-        
-        // Check collisions and update position
-        this.checkCollisions();
-        
-        // Update position
-        this.position.add(this.velocity.clone().multiplyScalar(deltaTime));
-        
-        // Update visual and camera
-        this.visual.position.copy(this.position);
-        this.yawObject.position.copy(this.position);
-        
-        // Check if grounded
-        this.checkGrounded();
-        
-        // Play footstep sounds
-        if (this.isGrounded && (Math.abs(this.velocity.x) > 0.1 || Math.abs(this.velocity.z) > 0.1)) {
+
+        // Transform moveDirection relative to the camera's current yaw (horizontal rotation)
+        const euler = new THREE.Euler(0, this.yawObject.rotation.y, 0, 'YXZ');
+        const worldMoveDirection = this.moveDirection.clone().applyEuler(euler);
+
+        // Calculate the desired velocity in the X and Z axes
+        const targetVelocityX = worldMoveDirection.x * currentSpeed;
+        const targetVelocityZ = worldMoveDirection.z * currentSpeed;
+
+        // Apply this velocity to the physics body.
+        // Y-axis velocity is managed by gravity and jump impulses.
+        // Using direct velocity assignment for responsiveness. Linear damping will handle slowdown.
+        this.body.velocity.x = targetVelocityX;
+        this.body.velocity.z = targetVelocityZ;
+
+        // Footstep sounds based on horizontal velocity
+        const horizontalVelocityMagnitude = Math.sqrt(this.body.velocity.x ** 2 + this.body.velocity.z ** 2);
+        if (this.isGrounded && horizontalVelocityMagnitude > 0.1) {
             if (!this.lastStepTime || Date.now() - this.lastStepTime > (this.isRunning ? 300 : 500)) {
                 this.playFootstep();
                 this.lastStepTime = Date.now();
@@ -373,65 +407,83 @@ export class Player {
         }
     }
     
-    checkCollisions() {
-        for (const obj of this.collisionObjects) {
-            if (obj.isGround) continue;
-            
-            const distance = this.position.distanceTo(obj.position);
-            if (distance < obj.radius + 0.5) {
-                // Calculate push direction
-                const pushDir = this.position.clone().sub(obj.position).normalize();
-                const pushDistance = (obj.radius + 0.5) - distance;
-                
-                // Push player away from object
-                this.position.add(pushDir.multiplyScalar(pushDistance));
-                
-                // Zero out velocity in collision direction
-                const dot = this.velocity.dot(pushDir);
-                if (dot < 0) {
-                    this.velocity.sub(pushDir.multiplyScalar(dot));
-                }
-            }
-        }
-    }
+    // checkCollisions() is removed as Cannon.js handles general collisions.
     
     checkGrounded() {
-        this.groundCheckRay.ray.origin.copy(this.position);
-        this.groundCheckRay.ray.direction.set(0, -1, 0);
+        if (!this.world || !this.body) {
+            this.isGrounded = false;
+            return;
+        }
+
+        const rayFrom = new CANNON.Vec3(this.body.position.x, this.body.position.y, this.body.position.z);
+
+        let rayToDistance;
+        if (this.bodyShapeType === 'Capsule') {
+            // From capsule center, ray goes down by half cylinder height + radius + epsilon
+            rayToDistance = (this.capsuleCylinderHeight / 2) + this.playerCollisionRadius + 0.15;
+        } else { // Sphere
+            rayToDistance = this.playerCollisionRadius + 0.15;
+        }
+        const rayTo = new CANNON.Vec3(this.body.position.x, this.body.position.y - rayToDistance, this.body.position.z);
         
-        const intersects = this.groundCheckRay.intersectObjects(
-            this.collisionObjects.filter(obj => obj.isGround).map(obj => obj.mesh)
-        );
-        
-        if (intersects.length > 0 && intersects[0].distance <= 2) {
-            if (!this.isGrounded) {
+        const result = new CANNON.RaycastResult();
+        // No specific collisionFilterGroup/Mask for now, assuming all world objects are potential ground.
+        this.world.raycastClosest(rayFrom, rayTo, {}, result);
+
+        const previouslyGrounded = this.isGrounded;
+        this.isGrounded = result.hasHit;
+
+        if (this.isGrounded) {
+            this.groundNormal.copy(result.hitNormalWorld);
+            if (!previouslyGrounded) {
                 this.playLandSound();
             }
-            this.isGrounded = true;
-            this.velocity.y = 0;
         } else {
-            this.isGrounded = false;
+            this.groundNormal.set(0, 1, 0); // Reset to flat if not grounded
+        }
+
+        // If grounded and Y velocity is very small (e.g. due to solver jitter), clamp it to 0.
+        // This helps stabilize the player on the ground.
+        if (this.isGrounded && Math.abs(this.body.velocity.y) < 0.1) {
+             this.body.velocity.y = 0;
         }
     }
     
     jump() {
-        if (this.isGrounded && this.stamina > 20) {
-            this.velocity.y = this.jumpForce;
+        if (this.isGrounded && this.stamina > 20 && this.body) {
+            // Apply an impulse directly upwards. this.jumpForce is now an impulse magnitude.
+            const impulse = new CANNON.Vec3(0, this.jumpForce, 0);
+            // Apply impulse at the body's center of mass (which is its position for a simple shape).
+            this.body.applyImpulse(impulse, this.body.position);
+
             this.stamina -= 20;
-            this.isGrounded = false;
+            this.isGrounded = false; // Set immediately; checkGrounded will confirm based on physics state.
             this.playJumpSound();
         }
     }
     
     toggleCrouch() {
-        this.isCrouching = this.keys.crouch;
+        this.isCrouching = this.keys.crouch; // This should be toggled in onKeyDown: this.keys.crouch = !this.keys.crouch;
+
+        // Adjust camera height (Y position of the pitchObject, relative to the yawObject/body center).
+        // this.body.position is the center of the capsule or sphere.
+        let normalCamRelativeY;
+        if (this.bodyShapeType === 'Capsule') {
+            // Position camera near the top of the capsule.
+            // Capsule center is origin. Top sphere center is at +cylinderHeight/2. Camera slightly below that.
+            normalCamRelativeY = (this.capsuleCylinderHeight / 2) + (this.playerCollisionRadius * 0.4);
+        } else { // Sphere
+            normalCamRelativeY = this.playerCollisionRadius * 0.5; // Slightly above sphere center
+        }
+        const crouchCamRelativeY = normalCamRelativeY * 0.5; // Crouching reduces height by half
+
+        this.targetPitchObjectY = this.isCrouching ? crouchCamRelativeY : normalCamRelativeY;
+        // Directly set pitchObject's Y for now. updateAnimations will use this as a base.
+        this.pitchObject.position.y = this.targetPitchObjectY;
         
-        // Adjust camera height
-        const targetY = this.isCrouching ? 1 : 2;
-        this.pitchObject.position.y = targetY;
-        
-        // Adjust collision height if needed
-        // ...
+        // TODO: Implement physics body shape change for crouching.
+        // This is more complex: involves changing CANNON.Shape, possibly re-adding the body.
+        // For now, only the camera height and speed are affected.
     }
     
     tryHide() {
@@ -483,57 +535,101 @@ export class Player {
     }
     
     updateFear(deltaTime, gameState) {
-        if (!gameState) return;
+        if (!gameState || !this.body) return; // Ensure body exists
         
-        // Increase fear when near the seeker
+        const currentPosition = this.getPosition(); // Uses this.body.position
+
         if (gameState.phase === 'seeking') {
             let nearestSeekerDistance = Infinity;
-            
+
             // Check distance to AI seeker
-            if (gameState.aiSeeker) {
-                const distance = this.position.distanceTo(gameState.aiSeeker.position);
+            if (gameState.aiSeeker && gameState.aiSeeker.position) {
+                const distance = currentPosition.distanceTo(gameState.aiSeeker.position);
                 nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
             }
             
             // Check distance to player seekers
-            for (const seekerId of gameState.seekers) {
-                const seeker = this.room.presence[seekerId];
-                if (seeker && seeker.position) {
-                    const distance = this.position.distanceTo(
-                        new THREE.Vector3(seeker.position.x, seeker.position.y, seeker.position.z)
-                    );
-                    nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
+            if (gameState.seekers && Array.isArray(gameState.seekers)) {
+                for (const seekerId of gameState.seekers) {
+                    const seeker = this.room && this.room.presence ? this.room.presence[seekerId] : undefined;
+                    if (seeker && seeker.position) {
+                        if (typeof seeker.position.x === 'number' &&
+                            typeof seeker.position.y === 'number' &&
+                            typeof seeker.position.z === 'number') {
+                            const seekerPosition = new THREE.Vector3(seeker.position.x, seeker.position.y, seeker.position.z);
+                            const distance = currentPosition.distanceTo(seekerPosition);
+                            nearestSeekerDistance = Math.min(nearestSeekerDistance, distance);
+                        }
+                    }
                 }
             }
             
-            // Update fear based on distance
             if (nearestSeekerDistance < 20) {
                 this.fear = Math.min(100, this.fear + deltaTime * (20 - nearestSeekerDistance));
             } else {
                 this.fear = Math.max(0, this.fear - deltaTime * 5);
             }
         } else {
-            // Gradually reduce fear outside seeking phase
             this.fear = Math.max(0, this.fear - deltaTime * 10);
         }
     }
     
     updateAnimations(deltaTime) {
-        // Update any animations (head bob, etc)
-        if (this.isGrounded && (Math.abs(this.velocity.x) > 0.1 || Math.abs(this.velocity.z) > 0.1)) {
-            const bobSpeed = this.isRunning ? 15 : 10;
-            const bobAmount = this.isRunning ? 0.15 : 0.1;
-            
-            const bobOffset = Math.sin(Date.now() * 0.01 * bobSpeed) * bobAmount;
-            this.pitchObject.position.y += bobOffset;
+        if (!this.body) return; // Ensure physics body exists
+
+        // Calculate horizontal speed from the physics body's velocity
+        const horizontalSpeed = Math.sqrt(this.body.velocity.x ** 2 + this.body.velocity.z ** 2);
+
+        // Determine the base Y position for the camera (pitchObject) based on crouching state.
+        // this.targetPitchObjectY is set by toggleCrouch() or initialized if undefined.
+        if (this.targetPitchObjectY === undefined) { // Initialize if not set by toggleCrouch yet
+            if (this.bodyShapeType === 'Capsule') {
+                this.targetPitchObjectY = (this.capsuleCylinderHeight / 2) + (this.playerCollisionRadius * 0.4);
+            } else {
+                this.targetPitchObjectY = this.playerCollisionRadius * 0.5;
+            }
         }
+        const baseCamY = this.targetPitchObjectY;
+
+        if (this.isGrounded && horizontalSpeed > 0.1) {
+            const bobSpeed = this.isRunning ? 14 : 10;
+            const bobAmount = this.isRunning ? 0.04 : 0.025;
+            
+            const bobOffset = Math.sin(Date.now() * 0.001 * bobSpeed * Math.PI * 2) * bobAmount;
+            this.pitchObject.position.y = baseCamY + bobOffset;
+        } else {
+            this.pitchObject.position.y = baseCamY; // Set to base when not moving/grounded
+        }
+
+        // TODO: Implement camera sway based on horizontal velocity changes or turning.
+
+        // Camera Sway based on horizontal velocity (strafe) and turning
+        let currentYaw = this.yawObject.rotation.y;
+        const deltaYaw = currentYaw - this.lastYaw;
+        this.lastYaw = currentYaw;
+
+        // Sway from strafing (roll)
+        const targetRoll = -this.body.velocity.x * 0.005; // Velocity.x is local to world, not player. Needs to be relative to player's view.
+        // To make it relative to player view, we need to project velocity onto player's right vector.
+        const rightVector = new THREE.Vector3(1,0,0).applyQuaternion(this.yawObject.quaternion);
+        const localVelocityX = new THREE.Vector3(this.body.velocity.x, 0, this.body.velocity.z).dot(rightVector);
+        const strafeRoll = -localVelocityX * 0.01; // Adjust multiplier for sensitivity
+
+        // Sway from turning (roll or slight positional offset)
+        const turnRoll = deltaYaw * -0.5; // Adjust multiplier for sensitivity
+
+        const totalTargetRoll = strafeRoll + turnRoll;
+        this.camera.rotation.z = THREE.MathUtils.lerp(this.camera.rotation.z, totalTargetRoll, 0.15);
+
     }
     
     updateNetworkPresence() {
-        if (this.room) {
+        if (this.room && this.body) {
             this.room.updatePresence({
-                position: this.position,
-                rotation: this.yawObject.rotation,
+                position: { x: this.body.position.x, y: this.body.position.y, z: this.body.position.z },
+                rotation: { y: this.yawObject.rotation.y }, // Send Euler Y rotation for yaw
+                // Optionally send velocity if server-side validation or other clients need it.
+                // velocity: { x: this.body.velocity.x, y: this.body.velocity.y, z: this.body.velocity.z },
                 isHiding: this.isHiding,
                 isRunning: this.isRunning,
                 isCrouching: this.isCrouching,
@@ -541,14 +637,12 @@ export class Player {
                 stamina: this.stamina,
                 fear: this.fear,
                 isAlive: this.isAlive,
-                velocity: this.velocity
             });
         }
     }
     
     takeDamage(amount) {
         this.health = Math.max(0, this.health - amount);
-        
         if (this.health <= 0) {
             this.die();
         }
@@ -556,28 +650,44 @@ export class Player {
     
     die() {
         this.isAlive = false;
-        this.velocity.set(0, 0, 0);
+        if (this.body) {
+            this.body.velocity.set(0, 0, 0); // Stop movement
+            // Optionally, make the body static or change its collision properties
+            // this.body.type = CANNON.Body.STATIC;
+            // Or remove it if it shouldn't interact anymore:
+            // this.world.removeBody(this.body);
+        }
         
-        if (this.visual) {
-            // Play death animation or effect
+        if (this.visual && this.body) { // Ensure body exists for position reference
+            // Simple death effect: make visual fall over (kinematically placed)
             this.visual.rotation.x = Math.PI / 2;
-            this.visual.position.y = 0.5;
+            // Adjust y so it appears on the ground, relative to where the physics body was.
+            // If body.position was center of sphere (radius), then visual base is y - radius.
+            this.visual.position.y = this.body.position.y - this.playerCollisionRadius;
         }
     }
     
     setCollisionObjects(objects) {
-        this.collisionObjects = objects;
+        // This method is largely superseded by adding static collision bodies to the CANNON.World.
+        // If used, it would likely be for specific dynamic objects the player needs to know about explicitly,
+        // beyond general world collision.
+        // this.collisionObjects = objects; // Assuming objects are CANNON.Body instances.
+        console.warn("Player.setCollisionObjects may need review with Cannon.js integration.");
     }
     
     setHideSpots(spots) {
-        this.hideSpots = spots;
+        this.hideSpots = spots; // hideSpots are likely Vector3 positions, no change needed here.
     }
     
     getPosition() {
-        return this.position.clone();
+        if (this.body) {
+            // Return a THREE.Vector3 for consistency with other game parts if they expect it.
+            return new THREE.Vector3(this.body.position.x, this.body.position.y, this.body.position.z);
+        }
+        return new THREE.Vector3(0,0,0); // Fallback if body doesn't exist
     }
     
-    getRotation() {
+    getRotation() { // This refers to the Y-axis rotation (yaw) of the player's view.
         return this.yawObject.rotation.y;
     }
 }

@@ -200,6 +200,7 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="player-list.css">
 </head>
 <body>
     <canvas id="gameCanvas"></canvas>
@@ -221,8 +222,12 @@
 
     <!-- Win/Lose Screen -->
     <div id="endScreen" class="hidden">
-        <h1 id="endTitle"></h1>
-        <button id="restartBtn">Restart</button>
+        <h1 id="endTitle">Game Over</h1>
+        <p id="endMessage" style="margin: 10px 0 20px; font-size: 1.1em;"></p>
+        <div id="winnersListContainer" style="margin-bottom: 20px;">
+            <!-- Winners will be populated here by JS -->
+        </div>
+        <button id="restartBtn">Restart Game</button>
     </div>
 
     <!-- Player Model Selection -->

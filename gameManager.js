@@ -14,7 +14,9 @@ export class GameManager {
             hiders: [],
             seekers: [],
             survivors: [],
-            roundNumber: 1
+            roundNumber: 1,
+            winningTeam: null,
+            winnersList: []
         };
         
         this.isHost = false;
@@ -49,7 +51,8 @@ export class GameManager {
         });
         
         document.getElementById('restartBtn')?.addEventListener('click', () => {
-            location.reload();
+            // location.reload(); // Old behavior
+            this.requestRestartGame(); // New behavior
         });
     }
     
@@ -266,9 +269,9 @@ export class GameManager {
         });
         
         // Start seeking phase timer
-        setTimeout(() => {
-            this.endGame(this.gameState.survivors);
-        }, this.gameState.maxTime * 1000);
+        // setTimeout(() => { // This will be handled by checkWinConditions based on timer
+        //     this.endGame(this.gameState.survivors);
+        // }, this.gameState.maxTime * 1000);
     }
     
     handlePlayerCaught(data) {
@@ -280,8 +283,8 @@ export class GameManager {
         this.addChatMessage(`Player was caught!`, 'system');
         
         // Check win condition
-        if (this.gameState.survivors.length === 0) {
-            this.endGame(this.gameState.seekers);
+        if (this.gameState.survivors.length === 0 && this.gameState.phase === 'seeking') {
+            this.endGame('seekers'); // Pass string 'seekers'
         }
         
         if (this.isHost) {
@@ -291,49 +294,132 @@ export class GameManager {
         }
     }
     
-    endGame(winners) {
-        if (!this.isHost) return;
+    endGame(winningTeam) { // winningTeam is "seekers" or "hiders"
+        if (this.gameState.phase === 'ended') return; // Prevent multiple calls
+        if (!this.isHost) {
+            console.log("Client received endGame call, but only host can end game.");
+            // Clients will receive the 'ended' phase via gameStateUpdate
+            return;
+        }
         
+        console.log(`Game Ending. Winning Team: ${winningTeam}`);
         this.gameState.phase = 'ended';
-        
-        const winnerNames = winners.map(id => this.room.peers[id]?.username || 'Unknown');
-        
-        this.room.updateRoomState({
+        this.gameState.winningTeam = winningTeam;
+
+        let winnersListNames = [];
+        if (winningTeam === 'hiders') {
+            winnersListNames = this.gameState.survivors.map(id => this.room.peers[id]?.username || `Player ${id.substring(0,4)}`);
+        } else if (winningTeam === 'seekers') {
+            winnersListNames = this.gameState.seekers.map(id => this.room.peers[id]?.username || `Player ${id.substring(0,4)}`);
+             if (winnersListNames.length === 0 && this.aiSeeker) { // Check if AI was the only seeker
+                winnersListNames.push("The Horse Head Demon");
+            }
+        }
+        this.gameState.winnersList = winnersListNames;
+
+        const gameStateUpdate = {
+            type: 'gameStateUpdate',
             gameState: this.gameState
-        });
+        };
+        this.room.send(gameStateUpdate); // Inform all clients of the final game state
+        this.room.updateRoomState(this.gameState); // Host updates authoritative room state
         
-        this.room.send({
-            type: 'gameEnd',
-            winners: winnerNames,
-            gameState: this.gameState
-        });
+        this.showGameResults(winningTeam, winnersListNames);
         
-        this.showGameResults(winnerNames);
-        
-        // Auto-restart after delay
+        // Auto-restart lobby after delay
         setTimeout(() => {
-            this.startLobby();
+            if (this.isHost) this.restartGame(); // Host initiates restart
         }, 15000);
     }
     
-    showGameResults(winners) {
-        const resultText = winners.length > 0 ? 
-            `Winners: ${winners.join(', ')}` : 
-            'No winners this round!';
-            
+    showGameResults(winningTeam, winnersList) {
         const endScreen = document.getElementById('endScreen');
         const endTitle = document.getElementById('endTitle');
-        
-        if (endScreen && endTitle) {
-            endTitle.textContent = resultText;
-            endScreen.classList.remove('hidden');
+        const endMessage = document.getElementById('endMessage'); // Assuming this element exists or will be added
+        const winnersListContainer = document.getElementById('winnersListContainer'); // Assuming this exists
+
+        if (!endScreen || !endTitle || !endMessage || !winnersListContainer) {
+            console.error("End screen UI elements not found!");
+            return;
+        }
+
+        if (winningTeam === 'hiders') {
+            endTitle.textContent = "Hiders Win!";
+            endMessage.textContent = "You survived the night!";
+        } else if (winningTeam === 'seekers') {
+            endTitle.textContent = "Seekers Win!";
+            endMessage.textContent = this.gameState.survivors.length === 0 ? "All hiders have been caught!" : "The hiders couldn't last the night!";
+        } else {
+            endTitle.textContent = "Game Over";
+            endMessage.textContent = "The round has concluded.";
+        }
+
+        winnersListContainer.innerHTML = '<h3>Winners:</h3>';
+        if (winnersList && winnersList.length > 0) {
+            const ul = document.createElement('ul');
+            winnersList.forEach(name => {
+                const li = document.createElement('li');
+                li.textContent = name;
+                ul.appendChild(li);
+            });
+            winnersListContainer.appendChild(ul);
+        } else {
+            winnersListContainer.innerHTML += '<p>No specific winners listed.</p>';
         }
         
-        // Auto-restart after delay
-        setTimeout(() => {
-            if (endScreen) endScreen.classList.add('hidden');
-            this.startLobby();
-        }, 15000);
+        endScreen.classList.remove('hidden');
+        // CSS should handle fade-in via class change
+    }
+
+    requestRestartGame() {
+        if (this.isHost) {
+            this.restartGame();
+        } else {
+            // Clients can request host to restart, or button is disabled for non-hosts
+            this.room.send({ type: 'requestRestart' });
+            this.showNotification("Requesting host to restart the game...", "info");
+        }
+    }
+
+    restartGame() {
+        if (!this.isHost && this.gameState.phase !== 'ended') { // Allow host to restart from lobby too
+            console.warn("Only host can restart the game.");
+            return;
+        }
+        console.log("Restarting game / Returning to lobby...");
+
+        this.gameState.phase = 'lobby';
+        this.gameState.timer = 0;
+        this.gameState.hiders = [];
+        this.gameState.seekers = [];
+        this.gameState.survivors = [];
+        this.gameState.winningTeam = null;
+        this.gameState.winnersList = [];
+        // Consider if roundNumber should reset or persist for multiple rounds
+        // this.gameState.roundNumber = 1;
+
+        // Reset player states (like isAlive, role) for all presences
+        // This should ideally be handled by players resetting themselves upon receiving new lobby state
+        // For now, host will clear roles in room state, players should adapt.
+        const currentPresences = this.room.presence;
+        for(const playerId in currentPresences){
+            this.room.requestPresenceUpdate(playerId, {role: 'waiting', isSeeker: false, isLocked: false});
+        }
+
+
+        const endScreen = document.getElementById('endScreen');
+        if (endScreen) endScreen.classList.add('hidden');
+        
+        const menu = document.getElementById('menu'); // Assuming 'menu' is the lobby screen
+        if (menu) menu.classList.remove('hidden');
+
+        // Player positions should be reset when new game starts (in positionPlayers)
+        // If player has a respawn method:
+        // this.player.respawn();
+        // this.aiSeeker.setPosition(new THREE.Vector3(0, 2, 0)); // Reset AI too
+        // this.aiSeeker.state = 'idle';
+
+        this.startLobby(); // This will send updates and check for auto-start if host
     }
     
     changePhase(newPhase) {
@@ -355,29 +441,37 @@ export class GameManager {
     }
     
     updatePlayerList(presence) {
-        const playerListContent = document.getElementById('playerListContent');
+        let playerListContent = document.getElementById('playerListContent');
         if (!playerListContent) {
             // Create player list if it doesn't exist
             this.createPlayerListUI();
-            return;
+            playerListContent = document.getElementById('playerListContent'); // Re-fetch after creation
+            if (!playerListContent) return; // Still not found, abort
         }
         
-        playerListContent.innerHTML = '';
+        playerListContent.innerHTML = ''; // Clear previous list
         
         for (const [playerId, playerData] of Object.entries(presence)) {
             const peer = this.room.peers[playerId];
-            if (!peer) continue;
+            if (!peer || !peer.username) continue; // Skip if peer data or username is missing
             
             const playerDiv = document.createElement('div');
-            playerDiv.style.margin = '5px 0';
+            playerDiv.classList.add('player-list-item');
+
+            const usernameSpan = document.createElement('span');
+            usernameSpan.classList.add('username');
             
             const role = playerData.role || 'waiting';
-            const roleClass = `role-${role}`;
-            
-            playerDiv.innerHTML = `
-                <span class="${roleClass}">${peer.username}</span>
-                <small style="color: #888;"> (${role})</small>
-            `;
+            const roleClass = `role-${role}`; // e.g., role-hider, role-seeker
+            usernameSpan.classList.add(roleClass);
+            usernameSpan.textContent = peer.username;
+
+            const roleSpan = document.createElement('small');
+            roleSpan.classList.add('role-text');
+            roleSpan.textContent = ` (${role})`;
+
+            playerDiv.appendChild(usernameSpan);
+            playerDiv.appendChild(roleSpan);
             
             playerListContent.appendChild(playerDiv);
         }
@@ -395,11 +489,13 @@ export class GameManager {
         if (ui && !document.getElementById('playerListContent')) {
             const playerList = document.createElement('div');
             playerList.id = 'playerListContent';
-            playerList.style.background = 'rgba(0, 0, 0, 0.7)';
-            playerList.style.padding = '10px';
-            playerList.style.borderRadius = '4px';
-            playerList.style.border = '1px solid #ff0000';
-            playerList.style.marginTop = '10px';
+            playerList.classList.add('player-list-container'); // Apply the new class
+            // Remove direct styling:
+            // playerList.style.background = 'rgba(0, 0, 0, 0.7)';
+            // playerList.style.padding = '10px';
+            // playerList.style.borderRadius = '4px';
+            // playerList.style.border = '1px solid #ff0000';
+            // playerList.style.marginTop = '10px';
             ui.appendChild(playerList);
         }
     }
@@ -543,8 +639,16 @@ export class GameManager {
         }
         
         // Check if all hiders caught
-        if (this.gameState.survivors.length === 0) {
-            this.endGame(this.gameState.seekers);
+        if (this.gameState.phase !== 'ended') { // Only check if game hasn't already ended
+            if (this.gameState.timer <= 0 && this.gameState.phase === 'seeking') { // Time ran out in seeking phase
+                if (this.gameState.survivors.length > 0) {
+                    this.endGame('hiders');
+                } else {
+                    this.endGame('seekers');
+                }
+            } else if (this.gameState.survivors.length === 0 && this.gameState.phase === 'seeking') { // All hiders caught
+                this.endGame('seekers');
+            }
         }
     }
     

@@ -1,8 +1,10 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import { Player } from './player.js';
 import { AISeeker } from './aiSeeker.js';
 import { Environment } from './environment.js';
 import { GameManager } from './gameManager.js';
+import { AudioManager } from './audioManager.js';
 
 class HorseHeadFarms {
     constructor() {
@@ -13,9 +15,11 @@ class HorseHeadFarms {
         this.aiSeeker = null;
         this.environment = null;
         this.gameManager = null;
+        this.audioManager = null; // Added AudioManager instance
         this.room = null;
         this.controls = null;
-        this.masterVolume = 1;
+        this.world = null; // Cannon.js world
+        // this.masterVolume = 1; // masterVolume is now handled by AudioManager
         this.selectedModel = 'default';
         this.playerModels = new Map();
         
@@ -35,22 +39,28 @@ class HorseHeadFarms {
     
     async init() {
         try {
+            this.audioManager = new AudioManager(); // Instantiate AudioManager
+
             this.setupScene();
             this.setupRenderer();
             this.setupCamera();
+            this.setupPhysics(); // Initialize Cannon.js world
             
             // Initialize WebSim room
             this.room = new WebsimSocket();
             await this.room.initialize();
             
             // Create game components
-            this.environment = new Environment(this.scene);
-            this.player = new Player(this.scene, this.camera, this.renderer, this.room);
-            this.aiSeeker = new AISeeker(this.scene, this.environment);
+            // Pass the cannon world to environment and player
+            this.environment = new Environment(this.scene, this.world);
+            // Pass audioManager and world to Player and AISeeker
+            this.player = new Player(this.scene, this.camera, this.renderer, this.room, this.audioManager, this.world);
+            this.aiSeeker = new AISeeker(this.scene, this.environment, this.audioManager, this.world); // Assuming AISeeker might also need the world
             this.gameManager = new GameManager(this.room, this.player, this.aiSeeker, this.environment);
             
             // Setup component interactions
-            this.player.setCollisionObjects(this.environment.getCollisionObjects());
+            // Collision objects are now managed by cannon-es world.
+            // this.player.setCollisionObjects(this.environment.getCollisionObjects());
             this.player.setHideSpots(this.environment.getHidingSpots());
             this.aiSeeker.setObstacles(this.environment.getCollisionObjects());
             
@@ -98,6 +108,53 @@ class HorseHeadFarms {
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
+    }
+
+    setupPhysics() {
+        this.world = new CANNON.World();
+        this.world.gravity.set(0, -9.82 * 2.5, 0); // Adjusted gravity
+        this.world.broadphase = new CANNON.SAPBroadphase(this.world);
+        // this.world.solver.iterations = 10;
+
+        // Materials (referenced by name, actual instances created in Player and Environment)
+        const playerMaterial = new CANNON.Material("playerMaterial");
+        const environmentMaterial = new CANNON.Material("environmentMaterial"); // Used by Environment.js
+        const groundMaterial = new CANNON.Material("groundMaterial"); // For the main.js ground plane
+
+        // Main ground plane (flat, fallback)
+        const mainGroundBody = new CANNON.Body({
+            mass: 0,
+            material: groundMaterial, // Specific material for this plane
+            shape: new CANNON.Plane(),
+        });
+        mainGroundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        mainGroundBody.position.set(0, -0.1, 0); // Slightly below environment heightfield to avoid Z-fighting if both are at y=0
+        this.world.addBody(mainGroundBody);
+
+        // Contact material for Player interactions with Environment objects (including Heightfield terrain)
+        const playerEnvContactMaterial = new CANNON.ContactMaterial(
+            playerMaterial,
+            environmentMaterial,
+            {
+                friction: 0.2,    // Lower friction for smoother movement against complex env colliders
+                restitution: 0.05 // Very low bounce
+            }
+        );
+        this.world.addContactMaterial(playerEnvContactMaterial);
+
+        // Contact material for Player interactions with the main.js flat ground plane
+        const playerGroundContactMaterial = new CANNON.ContactMaterial(
+            playerMaterial,
+            groundMaterial,
+            {
+                friction: 0.3,    // Standard friction for the basic ground
+                restitution: 0.1  // Low bounce
+            }
+        );
+        this.world.addContactMaterial(playerGroundContactMaterial);
+
+        // The old defaultMaterial and its contact material are no longer primary for player.
+        // If any other objects were to use "defaultMaterial", their interactions would need defining.
     }
     
     setupCamera() {
@@ -163,9 +220,9 @@ class HorseHeadFarms {
         
         if (volumeSlider) {
             volumeSlider.addEventListener('input', (e) => {
-                if (window.audioContext && window.audioContext.destination) {
-                    // Adjust master volume if possible
-                    this.masterVolume = parseFloat(e.target.value);
+                // Use AudioManager to set master volume
+                if (this.audioManager) {
+                    this.audioManager.setMasterVolume(parseFloat(e.target.value));
                 }
             });
         }
@@ -559,67 +616,59 @@ class HorseHeadFarms {
         animate();
     }
     
-    playScreamSound(position) {
-        if (!window.audioContext) return;
-        
-        // Generate scream sound
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 1.5, audioContext.sampleRate);
+    async playScreamSound(position) {
+        if (!this.audioManager || !this.audioManager.getAudioContext()) return;
+
+        // Create a simple scream buffer
+        const audioContext = this.audioManager.getAudioContext();
+        const duration = 1.5;
+        const sampleRate = audioContext.sampleRate;
+        const buffer = audioContext.createBuffer(1, sampleRate * duration, sampleRate);
         const data = buffer.getChannelData(0);
-        
+
         for (let i = 0; i < buffer.length; i++) {
-            const t = i / audioContext.sampleRate;
-            data[i] = Math.sin(t * 800 + Math.sin(t * 100) * 50) * Math.exp(-t * 2) * 0.5;
+            const t = i / sampleRate;
+            // A more piercing scream effect
+            data[i] = Math.sin(t * 1000 + Math.sin(t * 150 + Math.sin(t * 50) * 20) * 80) * Math.exp(-t * 3) * 0.7;
         }
         
-        const source = audioContext.createBufferSource();
-        const gainNode = audioContext.createGain();
-        
-        source.buffer = buffer;
-        
-        // 3D positioning
+        let soundVolume = 0.5;
         if (position && this.player) {
             const distance = this.player.getPosition().distanceTo(
                 new THREE.Vector3(position.x, position.y, position.z)
             );
-            gainNode.gain.value = Math.max(0, 1 - distance / 20);
-        } else {
-            gainNode.gain.value = 0.5;
+            soundVolume = Math.max(0, 1 - distance / 25); // Falloff distance
         }
-        
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        source.start();
+
+        this.audioManager.playSound(buffer, { volume: soundVolume });
     }
-    
-    playFootstepSound(position, volume = 0.1) {
-        if (!window.audioContext || !position || !this.player) return;
-        
+
+    async playFootstepSound(position, volume = 0.2) {
+        if (!this.audioManager || !this.audioManager.getAudioContext() || !position || !this.player) return;
+
         const distance = this.player.getPosition().distanceTo(
             new THREE.Vector3(position.x, position.y, position.z)
         );
-        
-        if (distance > 15) return; // Too far to hear
-        
-        const audioContext = window.audioContext;
-        const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.2, audioContext.sampleRate);
+
+        if (distance > 20) return; // Too far to hear
+
+        const audioContext = this.audioManager.getAudioContext();
+        const duration = 0.25;
+        const sampleRate = audioContext.sampleRate;
+        const buffer = audioContext.createBuffer(1, sampleRate * duration, sampleRate);
         const data = buffer.getChannelData(0);
-        
+
+        // Softer, more distinct footstep
         for (let i = 0; i < buffer.length; i++) {
-            data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (buffer.length * 0.1));
+            const t = i / sampleRate;
+            data[i] = (Math.random() * 0.5 - 0.25) * Math.exp(-t * 20); // Quieter and shorter
         }
         
-        const source = audioContext.createBufferSource();
-        const gainNode = audioContext.createGain();
-        
-        source.buffer = buffer;
-        gainNode.gain.value = volume * Math.max(0, 1 - distance / 15);
-        
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        source.start();
+        const soundVolume = volume * Math.max(0, 1 - distance / 20);
+
+        this.audioManager.playSound(buffer, { volume: soundVolume });
     }
-    
+
     showErrorMessage(message) {
         const notification = document.getElementById('gameNotification');
         if (notification) {
@@ -698,6 +747,11 @@ class HorseHeadFarms {
             const deltaTime = Math.min(this.clock.getDelta(), 0.1); // Cap delta time
             const currentTime = this.clock.getElapsedTime();
             
+            // Step the physics world
+            if (this.world) {
+                this.world.step(1 / 60, deltaTime, 3); // Fixed timestep, delta, max subSteps
+            }
+
             // Update performance stats
             this.updatePerformanceStats();
             
@@ -770,13 +824,17 @@ window.addEventListener('load', () => {
     new HorseHeadFarms();
 });
 
-// Handle audio context on user interaction
-document.addEventListener('click', () => {
-    if (!window.audioContext) {
-        window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+// The AudioManager's constructor now handles the initial user interaction
+// to create/resume the AudioContext.
+// We might still want a general resume on visibility change or other interactions if needed.
+document.addEventListener('visibilitychange', function() { // Use function to avoid 'this' issues if HorseHeadFarms instance is not accessible
+    const gameInstance = window.horseHeadFarmsInstance; // Assuming game instance is globally accessible
+    if (gameInstance && document.visibilityState === 'visible' && gameInstance.audioManager) {
+        gameInstance.audioManager.resumeContext();
     }
-    
-    if (window.audioContext.state === 'suspended') {
-        window.audioContext.resume();
-    }
-}, { once: true });
+});
+
+// Make instance globally accessible if needed for event handlers like visibilitychange
+window.addEventListener('load', () => {
+    window.horseHeadFarmsInstance = new HorseHeadFarms();
+});

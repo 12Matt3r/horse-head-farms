@@ -1,0 +1,36 @@
+.player-list-container {
+    background: rgba(0, 0, 0, 0.7);
+    padding: 10px;
+    border-radius: 4px;
+    border: 1px solid #ff0000; /* Red border as requested */
+    margin-top: 10px;
+    max-height: 200px; /* Added to prevent list from getting too long */
+    overflow-y: auto; /* Added for scrollability */
+}
+
+.player-list-item {
+    margin: 5px 0;
+    padding: 3px;
+    border-bottom: 1px solid #444; /* Separator for items */
+}
+
+.player-list-item:last-child {
+    border-bottom: none; /* No separator for the last item */
+}
+
+.player-list-item .username {
+    font-weight: bold;
+}
+
+.player-list-item .role-text {
+    color: #aaa; /* Slightly lighter grey for better readability */
+    font-size: 0.9em;
+    margin-left: 5px;
+}
+
+/* Role-specific classes for username styling */
+.role-waiting .username { color: #cccccc; }
+.role-hider .username { color: #00ff00; }
+.role-seeker .username { color: #ff0000; }
+/* Fallback if no specific role class matches, or for general styling */
+.username { color: #ffffff; }

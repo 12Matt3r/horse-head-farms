@@ -1,12 +1,19 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { threeToCannon, ShapeType } from 'three-to-cannon'; // Helper for Trimesh
 
 export class Environment {
-    constructor(scene) {
+    constructor(scene, world) {
         this.scene = scene;
+        this.world = world; // CANNON.World instance
         this.loader = new GLTFLoader();
         
-        this.collisionObjects = [];
+        this.envMaterial = new CANNON.Material("environmentMaterial");
+        // Contact materials involving "environmentMaterial" are now defined in main.js
+        // to centralize contact material management.
+
+        this.collisionObjects = []; // This might store CANNON.Body references if needed elsewhere, or become obsolete.
         this.hidingSpots = [];
         this.spawnPoints = [];
         
@@ -239,17 +246,26 @@ export class Environment {
         ];
         
         for (const position of cabinPositions) {
-            const cabin = this.createCabin();
-            cabin.position.copy(position);
-            this.scene.add(cabin);
+            const cabinVisual = this.createCabin(); // This creates the THREE.Group for the cabin
+            cabinVisual.position.copy(position);
+            this.scene.add(cabinVisual);
             
-            // Add to collision objects
-            this.collisionObjects.push({
-                position: position.clone(),
-                radius: 5,
-                type: 'cabin'
+            // Create CANNON.Body for the cabin
+            // Assuming the visual cabin's main structure (walls) is BoxGeometry(8, 4, 6)
+            // and its origin is at the base center of the walls.
+            const wallHalfExtents = new CANNON.Vec3(8 / 2, 4 / 2, 6 / 2);
+            const cabinShape = new CANNON.Box(wallHalfExtents);
+            const cabinBody = new CANNON.Body({
+                mass: 0, // Static
+                material: this.envMaterial,
+                shape: cabinShape,
+                // Position the physics body. cabinVisual.position is at the base.
+                // The CANNON.Box is centered at its position. So, Y should be base + height/2.
+                position: new CANNON.Vec3(position.x, position.y + (4/2) , position.z)
             });
-            
+            this.world.addBody(cabinBody);
+            // this.collisionObjects.push(cabinBody); // Optionally store if needed elsewhere
+
             // Add hiding spots around cabin
             this.hidingSpots.push(
                 position.clone().add(new THREE.Vector3(3, 0, 3)),
@@ -423,20 +439,36 @@ export class Environment {
             );
             
             // Don't place trees too close to center
-            if (tree.position.length() < 20) continue;
+            if (treeVisual.position.length() < 20) continue;
             
-            tree.rotation.y = Math.random() * Math.PI * 2;
-            this.scene.add(tree);
+            treeVisual.rotation.y = Math.random() * Math.PI * 2;
+            this.scene.add(treeVisual);
             
-            // Add collision
-            this.collisionObjects.push({
-                position: tree.position.clone(),
-                radius: 1,
-                type: 'tree'
+            // Create CANNON.Body for the tree trunk
+            // Visual trunk is CylinderGeometry(0.3, 0.5, 6)
+            const trunkRadiusTop = 0.3;
+            const trunkRadiusBottom = 0.5;
+            const trunkHeight = 6;
+            const trunkSegments = 8; // Default segments for cylinder
+            const trunkShape = new CANNON.Cylinder(trunkRadiusTop, trunkRadiusBottom, trunkHeight, trunkSegments);
+            
+            // The visual trunk mesh is positioned at y=3 within its group.
+            // The group (treeVisual) is positioned on the terrain.
+            // So, the world position of the trunk's center needs to be calculated.
+            const trunkBody = new CANNON.Body({
+                mass: 0, // Static
+                material: this.envMaterial,
+                shape: trunkShape,
+                // Position: treeVisual.position is base of tree. Trunk center is treeVisual.position.y + trunkHeight/2.
+                position: new CANNON.Vec3(treeVisual.position.x, treeVisual.position.y + trunkHeight / 2, treeVisual.position.z)
             });
-            
+            // Cylinder's main axis is Y in Cannon. If THREE.Cylinder is oriented differently, need to adjust quaternion.
+            // Assuming THREE.Cylinder is also Y-up by default.
+            this.world.addBody(trunkBody);
+            // this.collisionObjects.push(trunkBody);
+
             // Trees are good hiding spots
-            this.hidingSpots.push(tree.position.clone());
+            this.hidingSpots.push(treeVisual.position.clone());
         }
     }
     
@@ -480,11 +512,16 @@ export class Environment {
             this.scene.add(rock);
             
             // Add collision
-            this.collisionObjects.push({
-                position: rock.position.clone(),
-                radius: 1,
-                type: 'rock'
+            const rockRadius = rockVisual.geometry.parameters.radius || (size / 2); // Approx from Dodecahedron
+            const rockShape = new CANNON.Sphere(rockRadius);
+            const rockBody = new CANNON.Body({
+                mass: 0, // Static
+                material: this.envMaterial,
+                shape: rockShape,
+                position: new CANNON.Vec3(rockVisual.position.x, rockVisual.position.y + rockRadius, rockVisual.position.z) // Assuming visual position is at base
             });
+            this.world.addBody(rockBody);
+            // this.collisionObjects.push(rockBody);
             
             // Rocks can be hiding spots
             if (Math.random() < 0.3) {
@@ -516,12 +553,29 @@ export class Environment {
             table.rotation.y = Math.random() * Math.PI * 2;
             this.scene.add(table);
             
-            // Add collision
-            this.collisionObjects.push({
-                position: position.clone(),
-                radius: 2,
-                type: 'table'
+            // Refined collider for the tabletop
+            // Visual tabletop: BoxGeometry(4, 0.1, 1.5), its center is at y=1.0 within the 'table' group.
+            // The 'table' group itself is placed at 'position' (which has y=0).
+            const tabletopHalfExtents = new CANNON.Vec3(4 / 2, 0.1 / 2, 1.5 / 2);
+            const tabletopShape = new CANNON.Box(tabletopHalfExtents);
+
+            // The tabletop's visual center is at 'position.y + 1.0'.
+            // We need to apply the table group's rotation to the physics body.
+            const worldQuaternion = new CANNON.Quaternion();
+            worldQuaternion.setFromEuler(0, table.rotation.y, 0); // Assuming table group only rotates on Y
+
+            const tabletopBody = new CANNON.Body({
+                mass: 0, // Static
+                material: this.envMaterial,
+                shape: tabletopShape,
+                position: new CANNON.Vec3(position.x, position.y + 1.0, position.z),
+                quaternion: worldQuaternion
             });
+            this.world.addBody(tabletopBody);
+
+            // Note: Benches could also have separate, thinner colliders if needed for gameplay (e.g., hiding under them).
+            // For now, only the tabletop is a primary collider.
+            // this.collisionObjects.push(tableBody);
             
             // Under tables are hiding spots
             this.hidingSpots.push(position.clone());
@@ -582,19 +636,37 @@ export class Environment {
     createBridge(start, end) {
         const group = new THREE.Group();
         const length = start.distanceTo(end);
-        const center = start.clone().add(end).multiplyScalar(0.5);
-        
-        // Bridge deck
-        const deckGeometry = new THREE.BoxGeometry(length, 0.2, 2);
+        const center = start.clone().add(end).multiplyScalar(0.5); // Midpoint of the bridge
+        const direction = new THREE.Vector3().subVectors(end, start).normalize();
+        const angle = Math.atan2(direction.x, direction.z); // Angle for Y rotation
+
+        // Bridge deck visual
+        const deckWidth = 2; // Visual width
+        const deckThickness = 0.2; // Visual thickness
+        const deckGeometry = new THREE.BoxGeometry(length, deckThickness, deckWidth);
         const woodMaterial = new THREE.MeshLambertMaterial({ color: 0x8b4513 });
-        const deck = new THREE.Mesh(deckGeometry, woodMaterial);
-        deck.position.copy(center);
-        deck.castShadow = true;
-        deck.receiveShadow = true;
-        group.add(deck);
-        
-        // Railings
-        const railGeometry = new THREE.BoxGeometry(length, 1, 0.1);
+        const deckVisual = new THREE.Mesh(deckGeometry, woodMaterial);
+        deckVisual.position.copy(center);
+        deckVisual.rotation.y = angle; // Align with start-end direction
+        deckVisual.castShadow = true;
+        deckVisual.receiveShadow = true;
+        group.add(deckVisual);
+
+        // Create CANNON.Body for the bridge deck
+        const deckShape = new CANNON.Box(new CANNON.Vec3(length / 2, deckThickness / 2, deckWidth / 2));
+        const deckBody = new CANNON.Body({
+            mass: 0, // Static
+            material: this.envMaterial,
+            shape: deckShape,
+            position: new CANNON.Vec3(center.x, center.y, center.z),
+            quaternion: new CANNON.Quaternion().setFromEuler(0, angle, 0)
+        });
+        this.world.addBody(deckBody);
+
+        // Railings visuals (physics for these might be overkill unless important for gameplay)
+        const railHeight = 1;
+        const railThickness = 0.1;
+        const railGeometry = new THREE.BoxGeometry(length, railHeight, railThickness);
         const rail1 = new THREE.Mesh(railGeometry, woodMaterial);
         rail1.position.copy(center);
         rail1.position.y += 0.6;
@@ -634,13 +706,47 @@ export class Environment {
         ground.receiveShadow = true;
         this.scene.add(ground);
         
-        // Add ground to collision objects
-        this.collisionObjects.push({
-            position: new THREE.Vector3(0, 0, 0),
-            radius: 200,
-            type: 'ground',
-            isGround: true
+        // Add ground to collision objects - old way, will be replaced by Cannon body
+        // this.collisionObjects.push({
+        //     position: new THREE.Vector3(0, 0, 0),
+        //     radius: 200,
+        //     type: 'ground',
+        //     isGround: true
+        // });
+
+        // Create CANNON.Body for the terrain
+        const terrainSize = 400;
+        const heightfieldData = [];
+        const numSegments = 100; // Match PlaneGeometry segments
+
+        for (let i = 0; i <= numSegments; i++) {
+            heightfieldData.push([]);
+            for (let j = 0; j <= numSegments; j++) {
+                // Recreate the Y displacement logic from visual terrain
+                // This needs to be deterministic or use the actual visual geometry if possible
+                // For now, a simple random displacement, but ideally, this matches the visual.
+                const x = (j / numSegments - 0.5) * terrainSize;
+                const z = (i / numSegments - 0.5) * terrainSize;
+                // Use a consistent noise function if possible, instead of Math.random here for reproducibility
+                const y = Math.cos(x * 0.1) * Math.sin(z * 0.1) * 2; // Example noise
+                heightfieldData[i].push(y);
+            }
+        }
+
+        const heightfieldShape = new CANNON.Heightfield(heightfieldData, {
+            elementSize: terrainSize / numSegments
         });
+
+        const terrainBody = new CANNON.Body({
+            mass: 0, // Static
+            material: this.envMaterial, // Or a specific ground material
+        });
+        terrainBody.addShape(heightfieldShape);
+        terrainBody.position.set(-terrainSize / 2, 0, -terrainSize / 2); // Adjust position to align heightfield with plane
+        // terrainBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0); // Heightfields are typically XZ oriented by default
+        this.world.addBody(terrainBody);
+        // Note: The main ground plane from main.js might conflict or be redundant.
+        // This assumes environment.js is responsible for its own detailed terrain.
     }
     
     createWater() {
@@ -791,33 +897,65 @@ export class Environment {
     }
     
     setupCampgroundColliders(model) {
-        // Extract collision objects from campground model
         model.traverse((child) => {
-            if (child.isMesh && child.name.includes('collision')) {
-                this.collisionObjects.push({
-                    position: child.position.clone(),
-                    radius: child.geometry.boundingSphere?.radius || 1,
-                    type: 'building'
-                });
+            if (child.isMesh) {
+                // Example: Only create colliders for meshes explicitly named or tagged for collision,
+                // or filter by other properties (e.g., visibility, size).
+                // For this example, let's assume any mesh not part of a "detail" group or very small should collide.
+                if (child.name.toLowerCase().includes("collision") ||
+                    (!child.name.toLowerCase().includes("detail") && child.geometry.boundingSphere && child.geometry.boundingSphere.radius > 0.5)) {
+
+                    const cannonShape = threeToCannon(child, { type: ShapeType.BOX });
+
+                    if (cannonShape) {
+                        const body = new CANNON.Body({
+                            mass: 0, // Static
+                            shape: cannonShape,
+                            material: this.envMaterial
+                        });
+
+                        // Apply world position and quaternion from the Three.js mesh
+                        child.getWorldPosition(body.position);
+                        child.getWorldQuaternion(body.quaternion);
+
+                        this.world.addBody(body);
+                        // console.log(`Added collider for: ${child.name || 'unnamed_mesh'} at ${body.position.x},${body.position.y},${body.position.z}`);
+                    }
+                }
             }
         });
+        // Old collisionObjects logic is removed.
     }
     
     setupNuketownColliders(model) {
-        // Extract collision objects from nuketown model
+        // Nuketown model might be scaled and positioned. Ensure child transformations are world-relative.
         model.traverse((child) => {
             if (child.isMesh) {
-                const box = new THREE.Box3().setFromObject(child);
-                const size = box.getSize(new THREE.Vector3());
-                const center = box.getCenter(new THREE.Vector3());
-                
-                this.collisionObjects.push({
-                    position: center.clone(),
-                    radius: Math.max(size.x, size.z) / 2,
-                    type: 'building'
-                });
+                 // Filter which meshes become colliders. Example:
+                if (child.name.toLowerCase().includes("collision") ||
+                   (child.geometry && child.geometry.boundingSphere && child.geometry.boundingSphere.radius > 0.2)) { // Nuketown might have smaller relevant parts due to its scale.
+
+                    // Using BOX approximation. For more complex shapes, MESH (Trimesh) could be used but is more costly.
+                    const cannonShape = threeToCannon(child, { type: ShapeType.BOX });
+
+                    if (cannonShape) {
+                        const body = new CANNON.Body({
+                            mass: 0, // Static
+                            shape: cannonShape,
+                            material: this.envMaterial
+                        });
+
+                        // Get world transforms from the Three.js mesh
+                        child.getWorldPosition(body.position);
+                        child.getWorldQuaternion(body.quaternion);
+
+                        this.world.addBody(body);
+                        // console.log(`Added Nuketown collider for: ${child.name || 'unnamed_mesh'} at ${body.position.x},${body.position.y},${body.position.z}`);
+                    }
+                }
             }
         });
+        // Old collisionObjects logic is removed.
     }
     
     setupCampgroundHidingSpots() {
@@ -854,6 +992,9 @@ export class Environment {
     }
     
     getCollisionObjects() {
+        // This method should now return CANNON.Body instances if it's still used.
+        // Or, it could be deprecated if AI directly queries the physics world.
+        // For now, returning the array which might be populated with Cannon bodies or become empty.
         return this.collisionObjects;
     }
     
